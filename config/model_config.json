@@ -1,0 +1,63 @@
+{
+    "_comment": "jetson-inspect-v2 — Model / Classifier Configuration",
+    "_note": "Controls the shape-based classifier logic. No model weights needed (rule-based).",
+
+    "classifier": {
+        "type": "shape_rule",
+        "_comment": "type: 'shape_rule' (default). Future: 'onnx' | 'tensorrt'",
+
+        "rules": {
+            "ok_conditions": {
+                "_comment": "Product is OK if ALL conditions below pass",
+                "min_area": 2500.0,
+                "min_height_px": 80,
+                "min_solidity": 0.50,
+                "max_spike_ratio": 0.05,
+                "spike_cap_zone_fraction": 0.50
+            },
+            "ng_conditions": {
+                "_comment": "Product is NG if any spike or shape anomaly detected beyond thresholds",
+                "spike_ratio_exceeds": 0.05,
+                "solidity_below": 0.50
+            }
+        }
+    },
+
+    "roi": {
+        "_comment": "Perspective warp points for ROI extraction (pixels, 1920×1080 source)",
+        "warp_enabled": true,
+        "src_points": [
+            [604, 421],
+            [1327, 403],
+            [1338, 943],
+            [595, 973]
+        ],
+        "dst_size": [1080, 804],
+        "_tip": "Adjust src_points to match your actual conveyor belt ROI corners"
+    },
+
+    "preprocessing": {
+        "threshold_type": "fixed",
+        "_comment": "threshold_type: 'fixed' | 'otsu' | 'adaptive'",
+        "fixed_value": 170,
+        "blur_kernel_size": 0,
+        "_note": "Set blur_kernel_size > 0 (odd number) to enable Gaussian blur before threshold"
+    },
+
+    "onnx": {
+        "_comment": "Only used if classifier.type = 'onnx'",
+        "model_path": "models/inspect_model.onnx",
+        "input_size": [224, 224],
+        "confidence_threshold": 0.85,
+        "use_cuda": true
+    },
+
+    "tensorrt": {
+        "_comment": "Only used if classifier.type = 'tensorrt'",
+        "engine_path": "models/inspect_engine.trt",
+        "input_size": [224, 224],
+        "confidence_threshold": 0.85,
+        "fp16": true,
+        "_note": "Build engine first: trtexec --onnx=model.onnx --saveEngine=engine.trt --fp16"
+    }
+}

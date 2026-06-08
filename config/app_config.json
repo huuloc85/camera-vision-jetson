@@ -1,0 +1,56 @@
+{
+    "_comment": "jetson-inspect-v2 — Runtime Application Configuration",
+    "_note": "Reference mirror of include/core/config.h. Current C++ build uses compiled constants plus .counter_state.json for tuned detection params.",
+    "uart": {
+        "device": "/dev/ttyTHS1",
+        "baud_rate": 115200,
+        "_comment": "Jetson TX=pin8 → ESP32 GPIO16(RX) | Jetson RX=pin10 ← ESP32 GPIO17(TX)"
+    },
+    "camera": {
+        "frame_width": 1920,
+        "frame_height": 1080,
+        "capture_flush_count": 0,
+        "capture_settle_ms": 0,
+        "capture_timeout_s": 2.0,
+        "keepalive_interval_s": 2.0,
+        "sleep_timeout_s": 300.0,
+        "wake_settle_s": 1.0
+    },
+    "detection": {
+        "min_area": 2500.0,
+        "min_height": 80,
+        "min_solidity": 0.50,
+        "fixed_threshold": 170,
+        "spike_ratio_threshold": 0.05,
+        "spike_cap_zone": 0.50,
+        "edge_white_on_black_mode": false,
+        "rotate_roi_180": false,
+        "rotate_roi_using_src_remap": false,
+        "trigger_debounce_ms": 50
+    },
+    "color_correction": {
+        "_comment": "Neutral camera frames for inspection; avoid over-brightening before thresholding",
+        "brightness": 0.0,
+        "contrast": 1.0,
+        "saturation": 1.0
+    },
+    "timing": {
+        "main_loop_timeout_s": 15.0,
+        "waiting_render_interval_s": 0.2
+    },
+    "display": {
+        "status_bar_height": 60,
+        "side_panel_width": 380,
+        "font_scale_large": 1.4,
+        "font_scale_medium": 1.2,
+        "font_scale_small": 0.8,
+        "font_thickness": 3,
+        "font_thickness_thin": 2
+    },
+    "logging": {
+        "level": "WARNING",
+        "_comment": "Levels: DEBUG | INFO | WARNING | ERROR | CRITICAL",
+        "log_to_file": false,
+        "log_file_path": "/var/log/jetson_inspect.log"
+    }
+}

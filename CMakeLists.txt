@@ -4,6 +4,8 @@ project(jetson_inspect_v2 CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+option(BUILD_TB_MQTT_DEMO "Build ThingsBoard MQTT telemetry demo" OFF)
+
 # ── Find dependencies ─────────────────────────────────
 find_package(OpenCV REQUIRED)
 
@@ -35,6 +37,11 @@ set(HMI_SRCS
     src/hmi/touch_hmi.cpp
 )
 
+set(TELEMETRY_SRCS
+    src/telemetry/image_http_server.cpp
+    src/telemetry/thingsboard_mqtt_client.cpp
+)
+
 # ── Main executable ───────────────────────────────────
 add_executable(jetson_inspect_v2
     src/main.cpp
@@ -49,6 +56,32 @@ target_link_libraries(jetson_inspect_v2
     ${OpenCV_LIBS}
     pthread
 )
+
+if(BUILD_TB_MQTT_DEMO)
+    find_path(MOSQUITTO_INCLUDE_DIR mosquitto.h)
+    find_library(MOSQUITTO_LIBRARY mosquitto)
+    if(NOT MOSQUITTO_INCLUDE_DIR OR NOT MOSQUITTO_LIBRARY)
+        message(FATAL_ERROR
+            "BUILD_TB_MQTT_DEMO=ON requires libmosquitto. "
+            "Install libmosquitto-dev on Jetson/Ubuntu, then rerun CMake.")
+    endif()
+
+    add_executable(thingsboard_mqtt_demo
+        demos/thingsboard_mqtt_demo.cpp
+        ${TELEMETRY_SRCS}
+    )
+
+    target_include_directories(thingsboard_mqtt_demo PRIVATE
+        ${MOSQUITTO_INCLUDE_DIR}
+    )
+
+    target_link_libraries(thingsboard_mqtt_demo
+        PRIVATE
+        ${OpenCV_LIBS}
+        ${MOSQUITTO_LIBRARY}
+        pthread
+    )
+endif()
 
 # ── Install rules ─────────────────────────────────────
 install(TARGETS jetson_inspect_v2 DESTINATION bin)

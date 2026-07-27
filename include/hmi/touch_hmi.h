@@ -41,9 +41,9 @@ public:
     static constexpr int W       = 1024;
     static constexpr int H       = 600;
     static constexpr int BAR_H   = 52;
-    static constexpr int BTN_H   = 56;
-    static constexpr int BTN_BAR = 72;
-    static constexpr int BTN_Y   = H - BTN_BAR + 8;
+    static constexpr int BTN_H   = 64;
+    static constexpr int BTN_BAR = 96;
+    static constexpr int BTN_Y   = H - BTN_BAR + 12;
 
     explicit TouchHMI(VisionService* svc);
 

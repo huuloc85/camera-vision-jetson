@@ -7,14 +7,19 @@
         "_comment": "Jetson TX=pin8 → ESP32 GPIO16(RX) | Jetson RX=pin10 ← ESP32 GPIO17(TX)"
     },
     "camera": {
-        "frame_width": 1920,
-        "frame_height": 1080,
+        "frame_width": 1280,
+        "frame_height": 720,
+        "fps": 120,
         "capture_flush_count": 0,
         "capture_settle_ms": 0,
         "capture_timeout_s": 2.0,
+        "trigger_fresh_frame_wait_ms": 35,
+        "trigger_max_stale_frame_ms": 80,
         "keepalive_interval_s": 2.0,
         "sleep_timeout_s": 300.0,
-        "wake_settle_s": 1.0
+        "wake_settle_s": 1.0,
+        "max_exposure_us": 0,
+        "max_gain": 0
     },
     "detection": {
         "min_area": 2500.0,
@@ -26,7 +31,8 @@
         "edge_white_on_black_mode": false,
         "rotate_roi_180": false,
         "rotate_roi_using_src_remap": false,
-        "trigger_debounce_ms": 50
+        "trigger_debounce_ms": 50,
+        "trigger_render_full_roi": true
     },
     "color_correction": {
         "_comment": "Neutral camera frames for inspection; avoid over-brightening before thresholding",
@@ -39,8 +45,10 @@
         "waiting_render_interval_s": 0.2
     },
     "display": {
-        "status_bar_height": 60,
-        "side_panel_width": 380,
+        "status_bar_height": 52,
+        "button_bar_height": 96,
+        "touch_button_height": 64,
+        "side_panel_width": 210,
         "font_scale_large": 1.4,
         "font_scale_medium": 1.2,
         "font_scale_small": 0.8,

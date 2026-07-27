@@ -9,8 +9,6 @@
 #include <cstdio>
 #include <cmath>
 #include <cstdlib>
-#include <fcntl.h>
-#include <unistd.h>
 
 using core::now_sec;
 
@@ -23,6 +21,37 @@ static double get_jetson_temp() {
         last_read = now;
     }
     return last_temp;
+}
+
+static int env_int(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (!value || !value[0]) return fallback;
+    char* end = nullptr;
+    long parsed = std::strtol(value, &end, 10);
+    return end && *end == '\0' ? static_cast<int>(parsed) : fallback;
+}
+
+static bool env_bool(const char* name, bool fallback) {
+    const char* value = std::getenv(name);
+    if (!value || !value[0]) return fallback;
+    std::string v = value;
+    return v == "1" || v == "true" || v == "TRUE" || v == "yes" || v == "YES";
+}
+
+static const std::string& hmi_window_name() {
+    static const std::string name = [] {
+        const char* value = std::getenv("HMI_WINDOW_NAME");
+        return value && value[0] ? std::string(value) : std::string("HMI");
+    }();
+    return name;
+}
+
+static void set_hmi_windowed_geometry() {
+    const auto& win = hmi_window_name();
+    cv::setWindowProperty(win, cv::WND_PROP_FULLSCREEN, cv::WINDOW_NORMAL);
+    cv::resizeWindow(win, env_int("HMI_WINDOW_W", TouchHMI::W),
+                     env_int("HMI_WINDOW_H", TouchHMI::H));
+    cv::moveWindow(win, env_int("HMI_WINDOW_X", 0), env_int("HMI_WINDOW_Y", 0));
 }
 
 static cv::Scalar state_color(AppState state) {
@@ -58,6 +87,10 @@ static void put_centered_text(cv::Mat& canvas, const std::string& text,
                               double scale, cv::Scalar color, int thickness = 1) {
     int bl;
     auto sz = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, scale, thickness, &bl);
+    while (scale > 0.34 && sz.width > w - 8) {
+        scale -= 0.04;
+        sz = cv::getTextSize(text, cv::FONT_HERSHEY_SIMPLEX, scale, thickness, &bl);
+    }
     cv::putText(canvas, text, {x + (w - sz.width) / 2, y + (h + sz.height) / 2},
                 cv::FONT_HERSHEY_SIMPLEX, scale, color, thickness, cv::LINE_AA);
 }
@@ -70,26 +103,28 @@ TouchHMI::TouchHMI(VisionService* svc) : svc_(svc) {
 }
 
 void TouchHMI::build_buttons() {
-    int Y = BTN_Y, BH = BTN_H, G = 10;
+    int Y = BTN_Y, BH = BTN_H, G = 12;
 
     // Normal (PLC) mode
-    normal_.emplace_back("Can Chinh", G,           Y, 180, BH, Theme::BTN_CHECK, 0.62);
-    normal_.emplace_back("Reset",     G + 192,     Y, 130, BH, Theme::BTN_RESET, 0.60);
-    normal_.emplace_back("Den",       G + 334,     Y, 100, BH, Theme::BTN_LIGHT_ON, 0.68);
-    normal_.emplace_back("Thu Nho",   W - G - 310, Y, 130, BH, Theme::BTN_RESET, 0.58);
-    normal_.emplace_back("Thoat",     W - G - 160, Y, 150, BH, Theme::BTN_EXIT,  0.72);
+    int x = (W - (190 + 120 + 120 + 132 + 190 + 4 * G)) / 2;
+    normal_.emplace_back("Can Chinh", x, Y, 190, BH, Theme::BTN_CHECK, 0.56); x += 202;
+    normal_.emplace_back("Den",       x, Y, 120, BH, Theme::BTN_LIGHT_ON, 0.66); x += 132;
+    normal_.emplace_back("Reset",     x, Y, 120, BH, Theme::BTN_RESET, 0.58); x += 132;
+    normal_.emplace_back("Thu Nho",   x, Y, 132, BH, Theme::BTN_RESET, 0.46);
+    x += 144;
+    normal_.emplace_back("Thoat",     x, Y, 190, BH, Theme::BTN_EXIT, 0.66);
 
     // Calibration mode
-    int x = G;
-    calib_.emplace_back("<- Quay Lai", x,        Y, 142, BH, Theme::BTN_BACK,   0.52); x += 152;
-    calib_.emplace_back("Reset Ts",    x,        Y, 110, BH, Theme::BTN_RESET,  0.48); x += 118;
-    calib_.emplace_back("Thresh",      x,        Y,  90, BH, Theme::BTN_THRESH, 0.52); x += 98;
-    calib_.emplace_back("Den",         x,        Y,  80, BH, Theme::BTN_LIGHT_ON, 0.52); x += 92;
-    calib_.emplace_back("P1",          x,        Y,  55, BH, Theme::BTN_PARAM,  0.68);
-    calib_.emplace_back("P2",          x + 62,   Y,  55, BH, Theme::BTN_PARAM,  0.68);
-    calib_.emplace_back("P3",          x + 124,  Y,  55, BH, Theme::BTN_PARAM,  0.68);
-    calib_.emplace_back("-",           W-G-200,  Y,  90, BH, Theme::BTN_MINUS,  1.1);
-    calib_.emplace_back("+",           W-G-100,  Y,  90, BH, Theme::BTN_PLUS,   1.1);
+    x = G;
+    calib_.emplace_back("<- Lai",   x, Y, 132, BH, Theme::BTN_BACK,   0.52); x += 142;
+    calib_.emplace_back("Reset Ts", x, Y, 112, BH, Theme::BTN_RESET,  0.44); x += 122;
+    calib_.emplace_back("Thresh",   x, Y, 104, BH, Theme::BTN_THRESH, 0.48); x += 114;
+    calib_.emplace_back("Den",      x, Y,  94, BH, Theme::BTN_LIGHT_ON, 0.54); x += 104;
+    calib_.emplace_back("P1",       x, Y,  72, BH, Theme::BTN_PARAM,  0.68); x += 80;
+    calib_.emplace_back("P2",       x, Y,  72, BH, Theme::BTN_PARAM,  0.68); x += 80;
+    calib_.emplace_back("P3",       x, Y,  72, BH, Theme::BTN_PARAM,  0.68);
+    calib_.emplace_back("-",        W-G-230, Y, 108, BH, Theme::BTN_MINUS, 1.15);
+    calib_.emplace_back("+",        W-G-108, Y, 108, BH, Theme::BTN_PLUS,  1.15);
 }
 
 std::vector<UIButton>& TouchHMI::buttons() {
@@ -115,10 +150,17 @@ void TouchHMI::draw_btn(cv::Mat& canvas, UIButton& btn) {
     cv::Scalar body = btn.pressed ? Theme::darken(Theme::BG_CARD, 0.78) : Theme::BG_CARD;
     Draw::rrect(canvas, x, y, w, h, body, 5);
     cv::rectangle(canvas, {x, y}, {x+w, y+h}, btn.pressed ? bg : Theme::DIVIDER, 1);
-    cv::rectangle(canvas, {x, y}, {x+5, y+h}, bg, -1);
+    cv::rectangle(canvas, {x, y}, {x+7, y+h}, bg, -1);
     cv::line(canvas, {x+7, y+1}, {x+w-4, y+1}, Theme::lighten(body, 16), 1, cv::LINE_AA);
 
-    std::string label = (btn.name == "Thoat" && btn.pressed) ? "Giu 2s" : btn.name;
+    if (btn.name == "Thoat" && btn.pressed) {
+        double progress = std::min(1.0, std::max(0.0, (now_sec() - btn.pressed_since) / 2.0));
+        int pw = std::max(0, (int)((w - 18) * progress));
+        Draw::rrect(canvas, x + 9, y + h - 12, w - 18, 6, Theme::darken(Theme::RED, 0.35), 3);
+        if (pw > 0) Draw::rrect(canvas, x + 9, y + h - 12, pw, 6, Theme::RED, 3);
+    }
+
+    std::string label = btn.name;
     cv::Scalar txt_c = btn.pressed ? cv::Scalar(200,200,200) : cv::Scalar(255,255,255);
     put_centered_text(canvas, label, x+6, y, w-6, h, btn.fscale, txt_c, 2);
 }
@@ -258,7 +300,8 @@ void TouchHMI::draw_fps(cv::Mat& canvas) {
     auto sz = cv::getTextSize(buf, cv::FONT_HERSHEY_SIMPLEX, 0.42, 1, &bl);
     int pad = 5;
     int bw = sz.width + pad*2 + 6, bh = sz.height + pad*2 + 4;
-    int bx = W - bw - 8, by = BAR_H + 6;
+    int bx = W - 210 - bw - 12, by = BAR_H + 6;
+    if (bx < 8) bx = 8;
     if (by + bh <= canvas.rows && bx >= 0 && bx + bw <= canvas.cols) {
         cv::Mat roi = canvas(cv::Rect(bx, by, bw, bh));
         cv::Mat fill(roi.size(), CV_8UC3, Theme::BG);
@@ -371,7 +414,7 @@ cv::Mat TouchHMI::draw(const cv::Mat& frame, const InspectionResult& result) {
     cv::Mat canvas(H, W, CV_8UC3, Theme::BG);
 
     int cy = BAR_H, ch = H - BAR_H - BTN_BAR;
-    int result_panel_w = 158;
+    int result_panel_w = 210;
     int video_cw = W - result_panel_w;
     cv::rectangle(canvas, {0, cy}, {video_cw, cy+ch}, Theme::darken(Theme::BG, 0.82), -1);
 
@@ -429,60 +472,62 @@ void TouchHMI::draw_password_modal(cv::Mat& canvas) {
     cv::Mat overlay(canvas.size(), canvas.type(), cv::Scalar(0, 0, 0));
     cv::addWeighted(overlay, 0.55, canvas, 0.45, 0, canvas);
 
-    int mw = 390, mh = 455;
-    int mx = (W - mw) / 2, my = 62;
-    Draw::rrect(canvas, mx, my, mw, mh, Theme::BG_PANEL, 5);
+    int mw = W - 80, mh = H - 64;
+    int mx = (W - mw) / 2, my = 32;
+    Draw::rrect(canvas, mx, my, mw, mh, Theme::BG_PANEL, 6);
     cv::rectangle(canvas, {mx, my}, {mx+mw, my+mh}, Theme::DIVIDER_GLOW, 1);
-    cv::rectangle(canvas, {mx, my}, {mx+mw, my+5}, Theme::CYAN, -1);
+    cv::rectangle(canvas, {mx, my}, {mx+mw, my+7}, Theme::CYAN, -1);
 
-    cv::putText(canvas, "MAT KHAU CAN CHINH", {mx+42, my+38},
-                cv::FONT_HERSHEY_SIMPLEX, 0.68, Theme::CYAN, 2, cv::LINE_AA);
+    cv::putText(canvas, "MAT KHAU", {mx+38, my+48},
+                cv::FONT_HERSHEY_SIMPLEX, 0.82, Theme::CYAN, 2, cv::LINE_AA);
 
     std::string stars(password_input_.size(), '*');
-    Draw::rrect(canvas, mx+45, my+60, mw-90, 48, Theme::BG_CARD, 3);
+    Draw::rrect(canvas, mx+38, my+68, mw-76, 58, Theme::BG_CARD, 5);
     int bl;
-    auto psz = cv::getTextSize(stars, cv::FONT_HERSHEY_SIMPLEX, 0.9, 2, &bl);
-    cv::putText(canvas, stars, {mx+(mw-psz.width)/2, my+92},
-                cv::FONT_HERSHEY_SIMPLEX, 0.9, Theme::TXT, 2, cv::LINE_AA);
+    auto psz = cv::getTextSize(stars, cv::FONT_HERSHEY_SIMPLEX, 1.2, 3, &bl);
+    cv::putText(canvas, stars, {mx+(mw-psz.width)/2, my+109},
+                cv::FONT_HERSHEY_SIMPLEX, 1.2, Theme::TXT, 3, cv::LINE_AA);
 
     if (now_sec() < password_error_until_) {
-        cv::putText(canvas, "SAI MAT KHAU", {mx+120, my+128},
-                    cv::FONT_HERSHEY_SIMPLEX, 0.48, Theme::RED, 2, cv::LINE_AA);
+        cv::putText(canvas, "SAI MAT KHAU", {mx+38, my+152},
+                    cv::FONT_HERSHEY_SIMPLEX, 0.60, Theme::RED, 2, cv::LINE_AA);
     }
 
     const char* labels[12] = {"1","2","3","4","5","6","7","8","9","DEL","0","OK"};
-    int bw = 84, bh = 48, gap = 12;
-    int sx = mx + (mw - (bw * 3 + gap * 2)) / 2;
-    int sy = my + 154;
+    int gap = 14;
+    int bw = (mw - 92 - gap * 2) / 3;
+    int bh = 66;
+    int sx = mx + 46;
+    int sy = my + 160;
     for (int i = 0; i < 12; i++) {
         int col = i % 3, row = i / 3;
         int x = sx + col * (bw + gap);
-        int y = sy + row * (bh + gap);
+        int y = sy + row * (bh + 12);
         std::string label = labels[i];
         cv::Scalar c = (label == "OK") ? Theme::BTN_PLUS
                      : (label == "DEL" ? Theme::BTN_MINUS : Theme::BTN_PARAM);
-        Draw::rrect(canvas, x, y, bw, bh, Theme::BG_CARD, 4);
+        Draw::rrect(canvas, x, y, bw, bh, Theme::BG_CARD, 6);
         cv::rectangle(canvas, {x, y}, {x+bw, y+bh}, Theme::DIVIDER, 1);
-        cv::rectangle(canvas, {x, y}, {x+4, y+bh}, c, -1);
+        cv::rectangle(canvas, {x, y}, {x+8, y+bh}, c, -1);
         auto sz = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX,
-                                  label.size() > 1 ? 0.56 : 0.82, 2, &bl);
+                                  label.size() > 1 ? 0.78 : 1.16, 3, &bl);
         cv::putText(canvas, label, {x+(bw-sz.width)/2, y+(bh+sz.height)/2},
-                    cv::FONT_HERSHEY_SIMPLEX, label.size() > 1 ? 0.56 : 0.82,
-                    Theme::TXT, 2, cv::LINE_AA);
+                    cv::FONT_HERSHEY_SIMPLEX, label.size() > 1 ? 0.78 : 1.16,
+                    Theme::TXT, 3, cv::LINE_AA);
     }
 
-    int cancel_x = mx + 46, cancel_y = my + mh - 42, cancel_w = mw - 92, cancel_h = 34;
-    Draw::rrect(canvas, cancel_x, cancel_y, cancel_w, cancel_h, Theme::BTN_RESET, 4);
+    int cancel_x = mx + 46, cancel_y = my + mh - 58, cancel_w = mw - 92, cancel_h = 42;
+    Draw::rrect(canvas, cancel_x, cancel_y, cancel_w, cancel_h, Theme::BTN_RESET, 5);
     put_centered_text(canvas, "HUY", cancel_x, cancel_y, cancel_w, cancel_h,
-                      0.52, Theme::TXT, 2);
+                      0.58, Theme::TXT, 2);
 }
 
 bool TouchHMI::handle_password_touch(int x, int y) {
     if (!password_active_) return false;
 
-    int mw = 390, mh = 455;
-    int mx = (W - mw) / 2, my = 62;
-    int cancel_x = mx + 46, cancel_y = my + mh - 42, cancel_w = mw - 92, cancel_h = 34;
+    int mw = W - 80, mh = H - 64;
+    int mx = (W - mw) / 2, my = 32;
+    int cancel_x = mx + 46, cancel_y = my + mh - 58, cancel_w = mw - 92, cancel_h = 42;
     if (x >= cancel_x && x <= cancel_x + cancel_w &&
         y >= cancel_y && y <= cancel_y + cancel_h) {
         password_active_ = false;
@@ -491,13 +536,15 @@ bool TouchHMI::handle_password_touch(int x, int y) {
     }
 
     const char* labels[12] = {"1","2","3","4","5","6","7","8","9","DEL","0","OK"};
-    int bw = 84, bh = 48, gap = 12;
-    int sx = mx + (mw - (bw * 3 + gap * 2)) / 2;
-    int sy = my + 154;
+    int gap = 14;
+    int bw = (mw - 92 - gap * 2) / 3;
+    int bh = 66;
+    int sx = mx + 46;
+    int sy = my + 160;
     for (int i = 0; i < 12; i++) {
         int col = i % 3, row = i / 3;
         int bx = sx + col * (bw + gap);
-        int by = sy + row * (bh + gap);
+        int by = sy + row * (bh + 12);
         if (x < bx || x > bx + bw || y < by || y > by + bh) continue;
 
         std::string label = labels[i];
@@ -544,7 +591,7 @@ void TouchHMI::handle_key(int key) {
 void TouchHMI::handle(const std::string& name) {
     auto& st = svc_->state;
     if      (name == "Can Chinh")   { open_password_prompt(); }
-    else if (name == "<- Quay Lai") {
+    else if (name == "<- Quay Lai" || name == "<- Lai") {
         st.calibration_mode = false;
         st.last_label = "READY";
         st.last_color = cv::Scalar(255,255,0);
@@ -569,10 +616,13 @@ void TouchHMI::handle(const std::string& name) {
                 btn.name = is_minimized_ ? "Phong To" : "Thu Nho";
         }
         if (is_minimized_) {
-            cv::setWindowProperty("HMI", cv::WND_PROP_FULLSCREEN, cv::WINDOW_NORMAL);
-            cv::resizeWindow("HMI", 640, 380);
+            cv::setWindowProperty(hmi_window_name(), cv::WND_PROP_FULLSCREEN, cv::WINDOW_NORMAL);
+            cv::resizeWindow(hmi_window_name(), 640, 380);
         } else {
-            cv::setWindowProperty("HMI", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+            if (env_bool("HMI_FULLSCREEN", true))
+                cv::setWindowProperty(hmi_window_name(), cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+            else
+                set_hmi_windowed_geometry();
         }
     }
 }
@@ -581,19 +631,26 @@ void TouchHMI::handle(const std::string& name) {
 // TouchApp
 // ══════════════════════════════════════════════════════
 TouchApp::TouchApp() : hmi_(&vision_) {
-    // Suppress stderr during window creation
-    int dn = open("/dev/null", O_WRONLY);
-    int bk = dup(2); dup2(dn, 2);
+    const auto& win = hmi_window_name();
+    log_msg(LOG_WARNING, "TouchApp window init: DISPLAY=%s XAUTHORITY=%s window=%s",
+            std::getenv("DISPLAY") ? std::getenv("DISPLAY") : "",
+            std::getenv("XAUTHORITY") ? std::getenv("XAUTHORITY") : "",
+            win.c_str());
 
-    cv::namedWindow("HMI", cv::WINDOW_NORMAL);
-    cv::resizeWindow("HMI", 1024, 600);
-    cv::moveWindow("HMI", 0, 0);
-    try { cv::setWindowProperty("HMI", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN); }
+    cv::namedWindow(win, cv::WINDOW_NORMAL);
+    cv::resizeWindow(win, env_int("HMI_WINDOW_W", 1024), env_int("HMI_WINDOW_H", 600));
+    cv::moveWindow(win, env_int("HMI_WINDOW_X", 0), env_int("HMI_WINDOW_Y", 0));
+    try {
+        if (env_bool("HMI_FULLSCREEN", true))
+            cv::setWindowProperty(win, cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+        else
+            set_hmi_windowed_geometry();
+    }
     catch (...) {}
     cv::waitKey(1);
 
-    dup2(bk, 2); ::close(bk); ::close(dn);
-    cv::setMouseCallback("HMI", on_mouse_callback, this);
+    cv::setMouseCallback(win, on_mouse_callback, this);
+    log_msg(LOG_WARNING, "TouchApp window ready");
 }
 
 void TouchApp::on_mouse_callback(int event, int x, int y, int flags, void* ud) {
@@ -645,20 +702,21 @@ std::string TouchApp::run_waiting_state() {
     double now = now_sec();
     if (vision_.should_render_waiting_frame(now)) {
         cv::Mat canvas = hmi_.draw(vision_.last_result_frame(), idle);
-        cv::imshow("HMI", canvas);
+        cv::imshow(hmi_window_name(), canvas);
     }
 
     int key = cv::waitKey(1) & 0xFF;
     hmi_.handle_key(key);
     if (hmi_.password_active()) return "";
     if      (key == 'q') return "quit";
+    else if (key == 't') return "trigger";
     else if (key == 'l') vision_.gpio.toggle_light();
     else if (key == 'm') {
-        cv::setWindowProperty("HMI", cv::WND_PROP_FULLSCREEN, cv::WINDOW_NORMAL);
-        cv::resizeWindow("HMI", 640, 380);
+        cv::setWindowProperty(hmi_window_name(), cv::WND_PROP_FULLSCREEN, cv::WINDOW_NORMAL);
+        cv::resizeWindow(hmi_window_name(), 640, 380);
     }
     else if (key == 'f')
-        cv::setWindowProperty("HMI", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+        cv::setWindowProperty(hmi_window_name(), cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
     return "";
 }
 
@@ -678,7 +736,7 @@ std::string TouchApp::run_calibration_mode() {
 
         InspectionResult result = vision_.process_frame_for_calibration();
         cv::Mat canvas = hmi_.draw(result.roi_vis, result);
-        cv::imshow("HMI", canvas);
+        cv::imshow(hmi_window_name(), canvas);
 
         int key = cv::waitKey(1) & 0xFF;
         hmi_.handle_key(key);
@@ -686,11 +744,11 @@ std::string TouchApp::run_calibration_mode() {
         if      (key == 'q') return "quit";
         else if (key == 'l') vision_.gpio.toggle_light();
         else if (key == 'm') {
-            cv::setWindowProperty("HMI", cv::WND_PROP_FULLSCREEN, cv::WINDOW_NORMAL);
-            cv::resizeWindow("HMI", 640, 380);
+            cv::setWindowProperty(hmi_window_name(), cv::WND_PROP_FULLSCREEN, cv::WINDOW_NORMAL);
+            cv::resizeWindow(hmi_window_name(), 640, 380);
         }
         else if (key == 'f')
-            cv::setWindowProperty("HMI", cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
+            cv::setWindowProperty(hmi_window_name(), cv::WND_PROP_FULLSCREEN, cv::WINDOW_FULLSCREEN);
     }
     return "";
 }
@@ -698,7 +756,7 @@ std::string TouchApp::run_calibration_mode() {
 std::string TouchApp::run_trigger_cycle(double trigger_time) {
     InspectionResult result = vision_.process_trigger(trigger_time);
     cv::Mat canvas = hmi_.draw(result.roi_vis, result);
-    cv::imshow("HMI", canvas);
+    cv::imshow(hmi_window_name(), canvas);
     cv::waitKey(1);
     return "";
 }
@@ -719,7 +777,12 @@ void TouchApp::run() {
                 log_msg(LOG_WARNING, "Main loop: TRIGGER");
                 if (run_trigger_cycle(t) == "quit") break;
             } else {
-                if (run_waiting_state() == "quit") break;
+                std::string action = run_waiting_state();
+                if (action == "quit") break;
+                if (action == "trigger") {
+                    log_msg(LOG_WARNING, "Main loop: manual TRIGGER");
+                    if (run_trigger_cycle(now_sec()) == "quit") break;
+                }
             }
         }
     } catch (std::exception& e) {

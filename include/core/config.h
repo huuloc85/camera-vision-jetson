@@ -4,6 +4,7 @@
 #pragma once
 
 #include <opencv2/opencv.hpp>
+#include <string>
 
 // ══════════════════════════════════════════════════════
 // CUDA GPU Acceleration (Jetson Nano Maxwell 128-core)
@@ -22,30 +23,23 @@
 #endif
 
 // ══════════════════════════════════════════════════════
-// UART Serial Config — Jetson ↔ ESP32 via /dev/ttyTHS1
+// Direct GPIO Config — Jetson 40-pin header → PLC/opto inputs
 // ══════════════════════════════════════════════════════
-// Architecture: Jetson → UART → ESP32 → Opto → PLC
-//   Jetson pin 8  (TX) → ESP32 GPIO16 (RX)
-//   Jetson pin 10 (RX) ← ESP32 GPIO17 (TX)
-//   ESP32 GPIO4 = PLC TRIGGER INPUT
-//   ESP32 GPIO5 = OK, GPIO6 = NG, GPIO7 = BUSY, GPIO8 = LIGHT
-struct SerialConfig {
-    static constexpr const char* UART_DEVICE  = "/dev/ttyTHS1";
-    static constexpr int         BAUD_RATE    = 115200;
+// Uses BOARD numbering, matching Jetson.GPIO.setmode(GPIO.BOARD):
+//   BOARD 15 = OK
+//   BOARD 13 = NG
+//   BOARD 16 = BUSY
+//   BOARD 22 = PLC TRIGGER input from opto, active-HIGH rising edge
+struct GPIOConfig {
+    static constexpr int BOARD_OK      = 15;
+    static constexpr int BOARD_NG      = 13;
+    static constexpr int BOARD_BUSY    = 16;
+    static constexpr int BOARD_TRIGGER = 22;
+    static constexpr bool OUTPUT_ACTIVE_LOW = false;
+    static constexpr bool BUSY_ACTIVE_LOW = false;
+    static constexpr bool TRIGGER_ACTIVE_LOW = false;
 
-    // Commands: Jetson → ESP32
-    static constexpr const char* CMD_LIGHT_ON  = "LIGHT_ON";
-    static constexpr const char* CMD_LIGHT_OFF = "LIGHT_OFF";
-    static constexpr const char* CMD_OK_ON     = "OK_ON";
-    static constexpr const char* CMD_NG_ON     = "NG_ON";
-    static constexpr const char* CMD_BUSY_ON   = "BUSY_ON";
-    static constexpr const char* CMD_BUSY_OFF  = "BUSY_OFF";
-
-    // Responses: ESP32 → Jetson
-    static constexpr const char* MSG_TRIGGER   = "TRIGGER";
-    static constexpr const char* MSG_READY     = "ESP32 READY";
-
-    // Virtual pin IDs
+    // Logical pin IDs used by VisionService
     static constexpr int PIN_OK = 1;
     static constexpr int PIN_NG = 2;
 
@@ -60,8 +54,9 @@ struct SerialConfig {
 // Camera & Detection Config
 // ══════════════════════════════════════════════════════
 struct DetectionConfig {
-    static constexpr int    CAMERA_FRAME_WIDTH          = 1920;
-    static constexpr int    CAMERA_FRAME_HEIGHT         = 1080;
+    static constexpr int    CAMERA_FRAME_WIDTH          = 1280;
+    static constexpr int    CAMERA_FRAME_HEIGHT         = 720;
+    static constexpr int    CAMERA_FPS                  = 120;
     static constexpr double MIN_AREA                    = 2500.0;
     static constexpr int    MIN_HEIGHT                  = 80;
     static constexpr double MIN_SOLIDITY                = 0.50;
@@ -69,22 +64,18 @@ struct DetectionConfig {
     static constexpr double WAITING_RENDER_INTERVAL     = 0.2;
     static constexpr double MAIN_LOOP_TIMEOUT           = 15.0;
     static constexpr double CAPTURE_TIMEOUT             = 2.0;
+    static constexpr int    TRIGGER_FRESH_FRAME_WAIT_MS = 35;
+    static constexpr int    TRIGGER_MAX_STALE_FRAME_MS  = 80;
     static constexpr double CAMERA_KEEPALIVE_INTERVAL   = 2.0;
     static constexpr double CAMERA_SLEEP_TIMEOUT        = 300.0;
     static constexpr double CAMERA_WAKE_SETTLE          = 1.0;
     static constexpr int    CAPTURE_FLUSH_COUNT         = 0;
-    static constexpr int    CAPTURE_SETTLE_MS           = 0;
-    static constexpr int    TRIGGER_DEBOUNCE_MS         = 50;
     static constexpr double SPIKE_RATIO_THRESHOLD       = 0.05;
     static constexpr double SPIKE_CAP_ZONE              = 0.50;
     static constexpr bool   EDGE_WHITE_ON_BLACK_MODE    = false;
     static constexpr bool   ROTATE_ROI_180              = false;
     static constexpr bool   ROTATE_ROI_USING_SRC_REMAP  = false;
-
-    // Keep camera frames neutral; thresholding is sensitive to over-brightening.
-    static constexpr double CC_BRIGHTNESS  = 0.0;
-    static constexpr double CC_CONTRAST    = 1.0;
-    static constexpr double CC_SATURATION  = 1.0;
+    static constexpr bool   TRIGGER_RENDER_FULL_ROI     = true;
 };
 
 // ══════════════════════════════════════════════════════

@@ -14,6 +14,8 @@
 #include "gpio/gpio_controller.h"
 
 #include <atomic>
+#include <condition_variable>
+#include <cstdint>
 #include <mutex>
 #include <thread>
 #include <functional>
@@ -60,9 +62,8 @@ protected:
     std::timed_mutex cam_lock_;
     cv::Mat last_result_frame_;
     double  last_render_time_    = 0;
-    double  last_trigger_time_   = 0;
-    double  last_capture_time_   = 0;
-    double  last_trigger_activity_ = 0;
+    std::atomic<double> last_capture_time_{0};
+    std::atomic<double> last_trigger_activity_{0};
     int     keepalive_fail_count_ = 0;
 
     std::atomic<double> watchdog_heartbeat_;
@@ -71,10 +72,17 @@ protected:
     std::atomic<bool>   cleanup_done_{false};
     std::atomic<bool>   restart_in_progress_{false};
     std::thread watchdog_thread_;
+    std::thread frame_acquire_thread_;
     std::thread camera_keepalive_thread_;
+    std::atomic<bool>   frame_acquire_running_{false};
+    std::mutex          latest_frame_mutex_;
+    std::condition_variable latest_frame_cv_;
+    cv::Mat             latest_frame_;
+    double              latest_frame_time_ = 0;
 
     // ─── Camera lifecycle ──────────────────────────────
-    cv::Mat safe_capture(bool flush = true);
+    cv::Mat safe_capture(bool flush = true, double min_frame_time = 0.0,
+                         int fresh_wait_ms = 0);
     bool    restart_camera();
     void    sleep_camera();
     bool    wake_camera();
@@ -82,6 +90,7 @@ protected:
 
     // ─── Background threads ────────────────────────────
     void start_watchdog();
+    void start_frame_acquisition();
     void start_camera_keepalive();
 
     // ─── Frame processing internals ───────────────────

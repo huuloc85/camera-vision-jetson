@@ -3,6 +3,7 @@
 #include "telemetry/thingsboard_mqtt_client.h"
 #include "telemetry/image_http_server.h"
 #include "core/logger.h"
+#include "vision/camera.h"
 
 #include <atomic>
 #include <cerrno>
@@ -1028,6 +1029,7 @@ namespace
     telemetry::DeviceHealthTelemetry make_health(const std::string &device_id,
                                                  const std::string &mac_address,
                                                  bool mqtt_connected,
+                                                 bool camera_ok,
                                                  bool image_server_ok,
                                                  std::size_t mqtt_dropped)
     {
@@ -1041,7 +1043,7 @@ namespace
         h.mem_used_pct = mem_used_pct();
         h.disk_used_pct = disk_used_pct();
         h.cpu_temp_c = cpu_temp_c();
-        h.camera_ok = true;
+        h.camera_ok = camera_ok;
         h.gpio_ok = true;
         h.mqtt_connected = mqtt_connected;
         h.image_server_ok = image_server_ok;
@@ -1060,6 +1062,7 @@ namespace
            << ",\"mem_used_pct\":" << h.mem_used_pct
            << ",\"disk_used_pct\":" << h.disk_used_pct
            << ",\"cpu_temp_c\":" << h.cpu_temp_c
+           << ",\"camera_ok\":" << (h.camera_ok ? "true" : "false")
            << ",\"mqtt_connected\":" << (h.mqtt_connected ? "true" : "false")
            << ",\"image_server_ok\":" << (h.image_server_ok ? "true" : "false")
            << ",\"mqtt_dropped\":" << h.mqtt_dropped << "}";
@@ -1386,6 +1389,28 @@ int main()
 
     const int interval_ms = getenv_int("TB_DEMO_INTERVAL_MS", 1000);
     const int max_cycles = getenv_int("TB_DEMO_CYCLES", 0); // 0 = run until stopped
+    const bool use_real_camera = getenv_bool("TB_DEMO_USE_REAL_CAMERA", true);
+    const bool fallback_demo_frame = getenv_bool("TB_DEMO_CAMERA_FALLBACK_FRAME", true);
+    int camera_retry_cycles = getenv_int("TB_DEMO_CAMERA_RETRY_CYCLES", 10);
+    if (camera_retry_cycles <= 0)
+        camera_retry_cycles = 10;
+
+    LibcameraCapture camera;
+    bool camera_ok = false;
+    int last_camera_retry_sent = -camera_retry_cycles;
+    if (use_real_camera)
+    {
+        camera_ok = camera.start();
+        if (camera_ok)
+            log_msg(LOG_WARNING, "Real camera stream enabled");
+        else
+            log_msg(LOG_ERROR, "Real camera not available; using demo frame fallback");
+    }
+    else
+    {
+        log_msg(LOG_WARNING, "Real camera disabled by TB_DEMO_USE_REAL_CAMERA=0; using demo frame");
+    }
+
     int product_id = getenv_int("TB_DEMO_START_PRODUCT_ID", 1);
     int total_ok = getenv_int("TB_DEMO_START_OK", 0);
     int total_ng = getenv_int("TB_DEMO_START_NG", 0);
@@ -1426,7 +1451,32 @@ int main()
             total_ok++;
 
         auto telemetry = make_cycle(device_id, mac_address, product_id, total_ok, total_ng);
-        image_server.update_frame(make_demo_frame(telemetry, light_enabled.load(), calibration_mode.load()));
+        cv::Mat stream_frame;
+        if (use_real_camera)
+        {
+            if (!camera_ok && sent - last_camera_retry_sent >= camera_retry_cycles)
+            {
+                last_camera_retry_sent = sent;
+                camera_ok = camera.start();
+                if (camera_ok)
+                    log_msg(LOG_WARNING, "Real camera stream recovered");
+            }
+            if (camera_ok)
+            {
+                stream_frame = camera.capture();
+                if (stream_frame.empty())
+                {
+                    log_msg(LOG_ERROR, "Real camera returned empty frame; stopping camera and retrying later");
+                    camera.stop();
+                    camera_ok = false;
+                }
+            }
+        }
+        if (!stream_frame.empty())
+            image_server.update_frame(stream_frame);
+        else if (fallback_demo_frame)
+            image_server.update_frame(make_demo_frame(telemetry, light_enabled.load(), calibration_mode.load()));
+
         {
             std::lock_guard<std::mutex> lock(local_telemetry_mutex);
             latest_inspection_ts = telemetry.ts_ms;
@@ -1441,7 +1491,7 @@ int main()
 
         if (sent % health_every == 0)
         {
-            auto health = make_health(device_id, mac_address, client.connected(), image_server_ok, client.dropped_count());
+            auto health = make_health(device_id, mac_address, client.connected(), camera_ok, image_server_ok, client.dropped_count());
             image_server.set_health_json(health_json(health));
             {
                 std::lock_guard<std::mutex> lock(local_telemetry_mutex);
@@ -1456,6 +1506,7 @@ int main()
         std::this_thread::sleep_for(std::chrono::milliseconds(interval_ms));
     }
 
+    camera.close();
     if (mqtt_started)
         client.stop();
     log_msg(LOG_WARNING, "ThingsBoard MQTT demo stopped");

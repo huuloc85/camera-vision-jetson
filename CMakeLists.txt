@@ -68,6 +68,7 @@ if(BUILD_TB_MQTT_DEMO)
 
     add_executable(thingsboard_mqtt_demo
         demos/thingsboard_mqtt_demo.cpp
+        src/vision/camera.cpp
         ${TELEMETRY_SRCS}
     )
 
@@ -87,7 +88,7 @@ endif()
 install(TARGETS jetson_inspect_v2 DESTINATION bin)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/config/
     DESTINATION share/jetson_inspect_v2/config
-    FILES_MATCHING PATTERN "*.json"
+    FILES_MATCHING PATTERN "*.json" PATTERN "*.txt"
 )
 
 # GCC < 9: explicit filesystem link

@@ -6,6 +6,74 @@
 #include <algorithm>
 #include <climits>
 #include <cmath>
+#include <cstdlib>
+#include <fstream>
+#include <sstream>
+
+static std::vector<cv::Point2f> default_roi_points()
+{
+  return {{604, 421}, {1327, 403}, {1338, 943}, {595, 973}};
+}
+
+static int env_int(const char *name, int fallback)
+{
+  const char *value = std::getenv(name);
+  if (!value || !value[0]) return fallback;
+  char *end = nullptr;
+  long parsed = std::strtol(value, &end, 10);
+  return end && *end == '\0' ? static_cast<int>(parsed) : fallback;
+}
+
+static bool parse_roi_points_line(const std::string &line, std::vector<cv::Point2f> &points)
+{
+  std::string cleaned;
+  cleaned.reserve(line.size());
+  for (char ch : line)
+  {
+    if (ch == '#' || ch == ';') break;
+    if (ch == ',' || ch == '[' || ch == ']' || ch == '(' || ch == ')')
+      cleaned.push_back(' ');
+    else
+      cleaned.push_back(ch);
+  }
+
+  std::stringstream ss(cleaned);
+  float x = 0.0f, y = 0.0f;
+  while (ss >> x >> y)
+    points.emplace_back(x, y);
+  return points.size() == 4;
+}
+
+static bool load_roi_points_file(std::vector<cv::Point2f> &points)
+{
+  const char *env = std::getenv("JETSON_ROI_POINTS_FILE");
+  const char *candidates[] = {
+      env ? env : "",
+      "config/roi_points.txt",
+      "../config/roi_points.txt",
+      "/home/vvp/jetson-inspect-v2/config/roi_points.txt",
+      nullptr,
+  };
+
+  for (const char **path = candidates; *path; ++path)
+  {
+    if (!*path || !(*path)[0]) continue;
+    std::ifstream ifs(*path);
+    if (!ifs) continue;
+
+    std::vector<cv::Point2f> loaded;
+    std::string line;
+    while (std::getline(ifs, line))
+    {
+      if (parse_roi_points_line(line, loaded))
+      {
+        points = loaded;
+        return true;
+      }
+    }
+  }
+  return false;
+}
 
 // ── ImageProcessor ───────────────────────────────────
 ImageProcessor::ImageProcessor(const DetectionParams &params)
@@ -16,9 +84,24 @@ ImageProcessor::ImageProcessor(const DetectionParams &params)
 
   sharpen_kernel_ = (cv::Mat_<float>(3, 3) << 0, -1, 0, -1, 5, -1, 0, -1, 0);
 
-  // Perspective transform: 1920×1080 → 1080×804
-  std::vector<cv::Point2f> roi_pts = {
-      {604, 421}, {1327, 403}, {1338, 943}, {595, 973}};
+  // Perspective transform: ROI points are calibrated on a 1920x1080 source.
+  std::vector<cv::Point2f> roi_pts = default_roi_points();
+  if (load_roi_points_file(roi_pts)) {
+    log_msg(LOG_WARNING, "ROI config loaded from file: %s",
+            std::getenv("JETSON_ROI_POINTS_FILE") ? std::getenv("JETSON_ROI_POINTS_FILE") : "config/roi_points.txt");
+  }
+  const int camera_width = env_int(
+      "JETSON_CAM_WIDTH",
+      env_int("OPENCV_TAIL_CAMERA_WIDTH", DetectionConfig::CAMERA_FRAME_WIDTH));
+  const int camera_height = env_int(
+      "JETSON_CAM_HEIGHT",
+      env_int("OPENCV_TAIL_CAMERA_HEIGHT", DetectionConfig::CAMERA_FRAME_HEIGHT));
+  const float sx = camera_width / 1920.0f;
+  const float sy = camera_height / 1080.0f;
+  for (auto &p : roi_pts) {
+    p.x *= sx;
+    p.y *= sy;
+  }
   if (DetectionConfig::ROTATE_ROI_180 &&
       DetectionConfig::ROTATE_ROI_USING_SRC_REMAP) {
     for (auto &p : roi_pts) {
@@ -67,7 +150,7 @@ cv::Mat ImageProcessor::sharpen(const cv::Mat &img) {
 }
 
 std::pair<cv::Mat, cv::Mat> ImageProcessor::preprocess(const cv::Mat &roi) {
-  int t = std::max(50, std::min(250, params_.threshold));
+  int t = std::max(0, std::min(250, params_.threshold));
 
 #if USE_CUDA_ACCEL
   if (use_cuda_ && !DetectionConfig::EDGE_WHITE_ON_BLACK_MODE) {

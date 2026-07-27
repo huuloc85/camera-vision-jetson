@@ -1,339 +1,351 @@
 // -*- coding: utf-8 -*-
-// gpio/gpio_controller.cpp — UART serial GPIO via ESP32
-// Ported from full_calb.cpp — extracted into standalone module
+// gpio/gpio_controller.cpp — PLC GPIO via Python helper, matching opencv-detect
 #include "gpio/gpio_controller.h"
 #include "core/config.h"
 #include "core/logger.h"
 #include "core/time_utils.h"
 
+#include <algorithm>
 #include <chrono>
+#include <csignal>
+#include <cstdlib>
 #include <cstring>
-#include <cstdio>
-#include <cerrno>
-#include <cctype>
+#include <filesystem>
+#include <sstream>
+#include <string>
+#include <sys/select.h>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <thread>
 #include <unistd.h>
-#include <fcntl.h>
+#include <vector>
 
-#ifdef __linux__
-#include <termios.h>
-#endif
+namespace fs = std::filesystem;
 
 using core::now_sec;
-using core::sleep_sec;
 
-static std::string trim_ascii(const std::string& s) {
-    size_t first = 0;
-    while (first < s.size() && std::isspace(static_cast<unsigned char>(s[first]))) {
-        first++;
-    }
-    size_t last = s.size();
-    while (last > first && std::isspace(static_cast<unsigned char>(s[last - 1]))) {
-        last--;
-    }
-    return s.substr(first, last - first);
+namespace {
+
+constexpr int kPollMs = 5;
+constexpr int kDefaultResultHoldMs = 200;
+constexpr size_t kTriggerQueueMax = 8;
+
+bool env_enabled(const char* name) {
+    const char* value = std::getenv(name);
+    if (!value || !value[0]) return false;
+    return std::strcmp(value, "1") == 0 ||
+           std::strcmp(value, "true") == 0 ||
+           std::strcmp(value, "TRUE") == 0 ||
+           std::strcmp(value, "yes") == 0 ||
+           std::strcmp(value, "YES") == 0;
 }
 
-static bool write_all_nonblocking(int fd, const std::string& msg, int timeout_ms) {
-    auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
-    size_t offset = 0;
-    while (offset < msg.size()) {
-        ssize_t n = ::write(fd, msg.data() + offset, msg.size() - offset);
-        if (n > 0) {
-            offset += static_cast<size_t>(n);
-            continue;
-        }
-        if (n < 0 && (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK)) {
-            if (std::chrono::steady_clock::now() >= deadline) return false;
-            std::this_thread::sleep_for(std::chrono::milliseconds(1));
-            continue;
-        }
-        return false;
+int env_int(const char* name, int fallback) {
+    const char* value = std::getenv(name);
+    if (!value || !*value) return fallback;
+    try {
+        return std::max(0, std::stoi(value));
+    } catch (...) {
+        return fallback;
+    }
+}
+
+std::string executable_dir() {
+#if defined(__linux__)
+    std::vector<char> buffer(4096, '\0');
+    const ssize_t n = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
+    if (n <= 0) return "";
+    buffer[static_cast<size_t>(n)] = '\0';
+    return fs::path(buffer.data()).parent_path().string();
+#else
+    return "";
+#endif
+}
+
+std::string helper_path() {
+    const char* env = std::getenv("JETSON_INSPECT_PLC_HELPER");
+    if (env && *env) return env;
+
+    const std::vector<fs::path> candidates = {
+        fs::path("scripts/plc_gpio_helper.py"),
+        fs::path(executable_dir()) / "../scripts/plc_gpio_helper.py",
+        fs::path(executable_dir()) / "scripts/plc_gpio_helper.py",
+    };
+    for (const auto& candidate : candidates) {
+        if (!candidate.empty() && fs::exists(candidate)) return candidate.string();
+    }
+    return "scripts/plc_gpio_helper.py";
+}
+
+bool write_all(int fd, const std::string& text) {
+    const char* data = text.data();
+    size_t left = text.size();
+    while (left > 0) {
+        const ssize_t n = write(fd, data, left);
+        if (n <= 0) return false;
+        data += n;
+        left -= static_cast<size_t>(n);
     }
     return true;
 }
 
-static int open_serial(const char* device, int baud) {
-#ifdef __linux__
-    int fd = ::open(device, O_RDWR | O_NOCTTY | O_NONBLOCK);
-    if (fd < 0) {
-        log_msg(LOG_ERROR, "UART: Failed to open %s", device);
-        return -1;
+bool read_line(int fd, std::string& line, int timeout_ms) {
+    line.clear();
+    while (true) {
+        fd_set set;
+        FD_ZERO(&set);
+        FD_SET(fd, &set);
+        timeval timeout{};
+        timeout.tv_sec = timeout_ms / 1000;
+        timeout.tv_usec = (timeout_ms % 1000) * 1000;
+        const int ready = select(fd + 1, &set, nullptr, nullptr, &timeout);
+        if (ready <= 0) return false;
+
+        char c = '\0';
+        const ssize_t n = read(fd, &c, 1);
+        if (n <= 0) return false;
+        if (c == '\n') return true;
+        if (c != '\r') line.push_back(c);
     }
-    struct termios tty;
-    memset(&tty, 0, sizeof(tty));
-    if (tcgetattr(fd, &tty) != 0) { ::close(fd); return -1; }
-
-    speed_t speed = B115200;
-    if (baud == 9600) speed = B9600;
-    cfsetispeed(&tty, speed);
-    cfsetospeed(&tty, speed);
-
-    tty.c_cflag &= ~PARENB;
-    tty.c_cflag &= ~CSTOPB;
-    tty.c_cflag &= ~CSIZE;
-    tty.c_cflag |= CS8 | CREAD | CLOCAL;
-    tty.c_cflag &= ~CRTSCTS;
-    tty.c_lflag &= ~(ICANON | ECHO | ECHOE | ISIG);
-    tty.c_iflag &= ~(IXON | IXOFF | IXANY | INLCR | ICRNL | IGNCR);
-    tty.c_oflag &= ~OPOST;
-    tty.c_cc[VMIN] = 0;
-    tty.c_cc[VTIME] = 1;
-
-    tcflush(fd, TCIFLUSH);
-    if (tcsetattr(fd, TCSANOW, &tty) != 0) { ::close(fd); return -1; }
-    return fd;
-#else
-    (void)device; (void)baud;
-    return -1;
-#endif
 }
 
+std::string result_command(int pin) {
+    if (pin == GPIOConfig::PIN_OK) return "RESULT OK";
+    if (pin == GPIOConfig::PIN_NG) return "RESULT NG";
+    return "RESULT WAIT";
+}
+
+} // namespace
+
 GPIOController::GPIOController() {
-    log_msg(LOG_WARNING, "UART GPIO: %s @ %d baud",
-            SerialConfig::UART_DEVICE, SerialConfig::BAUD_RATE);
-    last_uart_rx_.store(now_sec());
-    serial_fd_.store(open_serial(SerialConfig::UART_DEVICE, SerialConfig::BAUD_RATE));
-    if (serial_fd_.load() >= 0) {
-        log_msg(LOG_WARNING, "UART: Open OK (fd=%d)", serial_fd_.load());
-    } else {
-        log_msg(LOG_ERROR, "UART: Open FAILED! Check: sudo chmod 666 %s",
-                SerialConfig::UART_DEVICE);
-    }
+    std::signal(SIGPIPE, SIG_IGN);
 
-    // Wait for ESP32 READY (max 5s)
-    if (serial_fd_.load() >= 0) {
-        auto start = std::chrono::steady_clock::now();
-        std::string buf;
-        bool ready = false;
-        while (!ready) {
-            double elapsed = std::chrono::duration<double>(
-                std::chrono::steady_clock::now() - start).count();
-            if (elapsed > 5.0) {
-                log_msg(LOG_WARNING, "UART: ESP32 READY timeout");
-                break;
-            }
-            char c;
-            int fd = serial_fd_.load();
-            int n = ::read(fd, &c, 1);
-            if (n > 0) {
-                if (c == '\n' || c == '\r') {
-                    if (!buf.empty() &&
-                        buf.find(SerialConfig::MSG_READY) != std::string::npos) {
-                        log_msg(LOG_WARNING, "UART: ESP32 READY received");
-                        ready = true;
-                    }
-                    buf.clear();
-                } else buf += c;
-            } else sleep_sec(0.01);
-        }
-    }
-
-    send_command(SerialConfig::CMD_LIGHT_ON);
+    mock_mode_ = env_enabled("JETSON_GPIO_MOCK") || env_enabled("GPIO_MOCK");
     light_on_ = true;
-    start_uart_listener();
-    start_uart_writer();
+
+    if (mock_mode_) {
+        log_msg(LOG_WARNING, "Jetson GPIO mock mode enabled; GPIO output is disabled");
+        return;
+    }
+
+    if (!start_gpio_worker()) {
+        mock_mode_ = true;
+        log_msg(LOG_ERROR, "Jetson GPIO helper failed to start; running GPIO in mock mode");
+        return;
+    }
+
+    log_msg(LOG_WARNING, "Jetson GPIO ready: BOARD OK=%d NG=%d BUSY=%d TRIGGER=%d active=HIGH",
+            GPIOConfig::BOARD_OK, GPIOConfig::BOARD_NG,
+            GPIOConfig::BOARD_BUSY, GPIOConfig::BOARD_TRIGGER);
 }
 
 GPIOController::~GPIOController() {
-    listening_ = false;
     cleanup();
 }
 
-bool GPIOController::reopen_serial() {
-    if (!listening_) return false;
-    std::unique_lock<std::timed_mutex> lock(serial_write_lock_, std::defer_lock);
-    if (!lock.try_lock_for(std::chrono::milliseconds(300))) return false;
-    int old_fd = serial_fd_.exchange(-1);
-    if (old_fd >= 0) ::close(old_fd);
-    int new_fd = open_serial(SerialConfig::UART_DEVICE, SerialConfig::BAUD_RATE);
-    serial_fd_.store(new_fd);
-    if (new_fd >= 0) {
-        log_msg(LOG_WARNING, "UART: Reconnected (fd=%d)", new_fd);
+bool GPIOController::start_gpio_worker() {
+    int to_child[2] = {-1, -1};
+    int from_child[2] = {-1, -1};
+    if (::pipe(to_child) != 0 || ::pipe(from_child) != 0) {
+        log_msg(LOG_ERROR, "PLC GPIO pipe failed");
+        if (to_child[0] >= 0) ::close(to_child[0]);
+        if (to_child[1] >= 0) ::close(to_child[1]);
+        if (from_child[0] >= 0) ::close(from_child[0]);
+        if (from_child[1] >= 0) ::close(from_child[1]);
+        return false;
+    }
+
+    const pid_t pid = ::fork();
+    if (pid < 0) {
+        log_msg(LOG_ERROR, "PLC GPIO fork failed");
+        ::close(to_child[0]);
+        ::close(to_child[1]);
+        ::close(from_child[0]);
+        ::close(from_child[1]);
+        return false;
+    }
+
+    if (pid == 0) {
+        ::dup2(to_child[0], STDIN_FILENO);
+        ::dup2(from_child[1], STDOUT_FILENO);
+        ::close(to_child[0]);
+        ::close(to_child[1]);
+        ::close(from_child[0]);
+        ::close(from_child[1]);
+
+        const std::string helper = helper_path();
+        const std::string trigger = std::to_string(GPIOConfig::BOARD_TRIGGER);
+        const std::string ok = std::to_string(GPIOConfig::BOARD_OK);
+        const std::string ng = std::to_string(GPIOConfig::BOARD_NG);
+        const std::string busy = std::to_string(GPIOConfig::BOARD_BUSY);
+        ::execlp("python3", "python3", "-u", helper.c_str(),
+                 "--trigger-pin", trigger.c_str(),
+                 "--ok-pin", ok.c_str(),
+                 "--ng-pin", ng.c_str(),
+                 "--busy-pin", busy.c_str(),
+                 static_cast<char*>(nullptr));
+        _exit(127);
+    }
+
+    ::close(to_child[0]);
+    ::close(from_child[1]);
+    child_pid_ = static_cast<int>(pid);
+    in_fd_ = to_child[1];
+    out_fd_ = from_child[0];
+
+    std::string response;
+    if (!read_line(out_fd_, response, 5000)) {
+        log_msg(LOG_ERROR, "PLC GPIO helper did not respond");
+        close_process();
+        return false;
+    }
+    if (response.rfind("READY", 0) != 0) {
+        log_msg(LOG_ERROR, "PLC GPIO helper startup failed: %s", response.c_str());
+        close_process();
+        return false;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        trigger_high_ = false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(trigger_mutex_);
+        trigger_queue_.clear();
+    }
+    start_worker();
+    return true;
+}
+
+bool GPIOController::request(const std::string& command, std::string& response, int timeout_ms) {
+    if (mock_mode_) {
+        log_msg(LOG_WARNING, "GPIO MOCK>> %s", command.c_str());
+        response = command == "READ" ? "0" : "OK";
         return true;
     }
-    log_msg(LOG_ERROR, "UART: Reconnect failed");
-    return false;
+
+    if (in_fd_ < 0 || out_fd_ < 0) return false;
+    std::lock_guard<std::mutex> lock(io_mutex_);
+    if (!write_all(in_fd_, command + "\n")) return false;
+    return read_line(out_fd_, response, timeout_ms);
 }
 
-bool GPIOController::send_command(const std::string& cmd) {
-    std::string msg = cmd + "\n";
-    for (int attempt = 0; attempt < 2; attempt++) {
-        if (serial_fd_.load() < 0 && !reopen_serial()) return false;
-
-        std::unique_lock<std::timed_mutex> lock(serial_write_lock_, std::defer_lock);
-        if (!lock.try_lock_for(std::chrono::milliseconds(200))) return false;
-
-        int fd = serial_fd_.load();
-        if (fd < 0) continue;
-        if (write_all_nonblocking(fd, msg, 200)) return true;
-
-        int err = errno;
-        log_msg(LOG_WARNING, "UART write failed for '%s' (errno=%d)",
-                cmd.c_str(), err);
-        int old_fd = serial_fd_.exchange(-1);
-        if (old_fd >= 0) ::close(old_fd);
-        lock.unlock();
-        if (listening_) reopen_serial();
-    }
-    return false;
+bool GPIOController::command_ok(const std::string& command) {
+    std::string response;
+    const bool ok = request(command, response) && response == "OK";
+    if (!ok) log_msg(LOG_WARNING, "GPIO command failed: %s", command.c_str());
+    return ok;
 }
 
-void GPIOController::enqueue_command(const std::string& cmd) {
-    constexpr size_t CMD_QUEUE_MAX = 32;
-    std::lock_guard<std::mutex> lock(cmd_mutex_);
-    if (cmd_queue_.size() >= CMD_QUEUE_MAX) {
-        cmd_queue_.pop_front();
-        log_msg(LOG_WARNING, "UART command queue overflow, dropping oldest");
-    }
-    cmd_queue_.push_back(cmd);
+bool GPIOController::read_trigger(bool& high) {
+    std::string response;
+    if (!request("READ", response, 200)) return false;
+    high = response == "1";
+    return true;
 }
 
-void GPIOController::start_uart_listener() {
-    uart_listener_thread_ = std::thread([this]() {
-        constexpr double PING_INTERVAL_S        = 15.0;
-        constexpr double STATUS_INTERVAL_S      = 120.0;
-        constexpr double STALE_WARN_S           = 45.0;
-        constexpr double TRIGGER_DEBOUNCE_S     = 0.04;
-        constexpr size_t TRIGGER_QUEUE_MAX      = 8;
-        std::string buf;
-        double last_reopen_try  = 0.0;
-        double last_ping        = 0.0;
-        double last_status      = 0.0;
-        double last_stale_warn  = 0.0;
-        double last_trig_overflow_warn = 0.0;
+void GPIOController::start_worker() {
+    worker_running_.store(true);
+    worker_ = std::thread(&GPIOController::worker_loop, this);
+}
 
-        while (listening_) {
-            double now = now_sec();
+void GPIOController::stop_worker() {
+    worker_running_.store(false);
+    if (worker_.joinable()) worker_.join();
+}
 
-            // Periodic PING (non-critical → async queue)
-            if (now - last_ping >= PING_INTERVAL_S) {
-                enqueue_command("PING");
-                cmd_cv_.notify_one();
-                last_ping = now;
-            }
-            if (now - last_status >= STATUS_INTERVAL_S) {
-                enqueue_command("STATUS");
-                cmd_cv_.notify_one();
-                last_status = now;
-            }
+void GPIOController::worker_loop() {
+    bool have_sample = false;
+    bool last_high = false;
 
-            double last_rx = last_uart_rx_.load();
-            if (now - last_rx >= STALE_WARN_S && now - last_stale_warn >= STALE_WARN_S) {
-                log_msg(LOG_WARNING, "UART: no ESP32 msg for %.0fs", now - last_rx);
-                last_stale_warn = now;
-            }
-
-            if (serial_fd_.load() < 0) {
-                if (now - last_reopen_try >= 1.0) {
-                    reopen_serial();
-                    last_reopen_try = now;
-                }
-                sleep_sec(0.05);
-                continue;
-            }
-
-            char c;
-            int fd = serial_fd_.load();
-            int n = ::read(fd, &c, 1);
-            if (n > 0) {
-                if (c == '\n' || c == '\r') {
-                    if (!buf.empty()) {
-                        buf = trim_ascii(buf);
-                        last_uart_rx_.store(now_sec());
-                        if (buf == SerialConfig::MSG_TRIGGER) {
-                            double t_now = now_sec();
-                            double last_enq = last_trigger_enqueue_.load();
-                            if (t_now - last_enq >= TRIGGER_DEBOUNCE_S) {
-                                last_trigger_enqueue_.store(t_now);
-                                std::lock_guard<std::mutex> lock(trigger_mutex_);
-                                if (trigger_queue_.size() >= TRIGGER_QUEUE_MAX) {
-                                    trigger_queue_.pop_front();
-                                    if (t_now - last_trig_overflow_warn >= 2.0) {
-                                        log_msg(LOG_WARNING, "Trigger queue overflow");
-                                        last_trig_overflow_warn = t_now;
-                                    }
-                                }
-                                trigger_queue_.push_back(t_now);
-                                log_msg(LOG_WARNING, "UART<< TRIGGER enqueued (queue=%d)",
-                                        (int)trigger_queue_.size());
-                            } else {
-                                log_msg(LOG_WARNING, "UART<< TRIGGER debounced (%.1fms)",
-                                        (t_now - last_enq) * 1000.0);
-                            }
-                        } else if (buf.find(SerialConfig::MSG_READY) != std::string::npos
-                                   || buf.rfind("ESP32 ", 0) == 0 || buf == "PONG") {
-                            log_msg(LOG_WARNING, "UART<< %s", buf.c_str());
-                        } else {
-                            log_msg(LOG_WARNING, "UART<< UNKNOWN [%s]", buf.c_str());
-                        }
-                        buf.clear();
-                    }
-                } else {
-                    buf += c;
-                    if (buf.size() > 128) {
-                        log_msg(LOG_WARNING, "UART line too long, dropping buffer");
-                        buf.clear();
-                    }
-                }
-            } else if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
-                log_msg(LOG_WARNING, "UART read error (errno=%d), reconnecting...", errno);
-                {
-                    std::unique_lock<std::timed_mutex> lock(serial_write_lock_, std::defer_lock);
-                    if (lock.try_lock_for(std::chrono::milliseconds(100))) {
-                        int old_fd = serial_fd_.exchange(-1);
-                        if (old_fd >= 0) ::close(old_fd);
-                    }
-                }
-                reopen_serial();
-                sleep_sec(0.05);
-            } else {
-                sleep_sec(0.001);
-            }
+    while (worker_running_.load()) {
+        bool high = false;
+        if (!read_trigger(high)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+            continue;
         }
-    });
+
+        {
+            std::lock_guard<std::mutex> lock(state_mutex_);
+            trigger_high_ = high;
+        }
+
+        if (!have_sample) {
+            have_sample = true;
+            last_high = high;
+        } else if (high && !last_high) {
+            double t_now = now_sec();
+            std::lock_guard<std::mutex> lock(trigger_mutex_);
+            if (trigger_queue_.size() >= kTriggerQueueMax) {
+                trigger_queue_.pop_front();
+                log_msg(LOG_WARNING, "GPIO trigger queue overflow");
+            }
+            trigger_queue_.push_back(t_now);
+            log_msg(LOG_WARNING, "GPIO<< PLC TRIGGER enqueued (queue=%d)",
+                    static_cast<int>(trigger_queue_.size()));
+        }
+
+        last_high = high;
+        std::this_thread::sleep_for(std::chrono::milliseconds(kPollMs));
+    }
 }
 
-void GPIOController::start_uart_writer() {
-    uart_writer_thread_ = std::thread([this]() {
-        while (listening_) {
-            std::string cmd;
-            {
-                std::unique_lock<std::mutex> lock(cmd_mutex_);
-                cmd_cv_.wait_for(lock, std::chrono::milliseconds(100),
-                    [this]() { return !cmd_queue_.empty() || !listening_; });
-                if (!listening_) break;
-                if (cmd_queue_.empty()) continue;
-                cmd = cmd_queue_.front();
-                cmd_queue_.pop_front();
-            }
-            if (!send_command(cmd)) {
-                log_msg(LOG_WARNING, "UART writer: failed '%s'", cmd.c_str());
-                if (cmd == SerialConfig::CMD_OK_ON || cmd == SerialConfig::CMD_NG_ON) {
-                    send_command(SerialConfig::CMD_BUSY_OFF);
-                }
-            }
+void GPIOController::close_process() {
+    stop_worker();
+
+    if (in_fd_ >= 0 && out_fd_ >= 0) {
+        command_ok("ALL_LOW");
+        command_ok("QUIT");
+    }
+
+    if (in_fd_ >= 0) ::close(in_fd_);
+    if (out_fd_ >= 0) ::close(out_fd_);
+    in_fd_ = -1;
+    out_fd_ = -1;
+
+    if (child_pid_ > 0) {
+        int status = 0;
+        const pid_t waited = ::waitpid(child_pid_, &status, WNOHANG);
+        if (waited == 0) {
+            ::kill(child_pid_, SIGTERM);
+            ::waitpid(child_pid_, &status, 0);
         }
-    });
+    }
+    child_pid_ = -1;
 }
 
 void GPIOController::signal_result(int pin) {
-    std::string cmd;
-    if (pin == SerialConfig::PIN_OK) cmd = SerialConfig::CMD_OK_ON;
-    else if (pin == SerialConfig::PIN_NG) cmd = SerialConfig::CMD_NG_ON;
-    else return;
-    // CRITICAL PATH: direct UART (not queued) for minimal latency
-    log_msg(LOG_WARNING, "UART>> %s (direct)", cmd.c_str());
-    if (!send_command(cmd)) {
-        log_msg(LOG_WARNING, "UART>> %s FAILED, retry once", cmd.c_str());
-        send_command(cmd);
+    log_msg(LOG_WARNING, "GPIO>> %s", GPIOConfig::pin_name(pin).c_str());
+    if (command_ok(result_command(pin))) {
+        result_on_time_ = now_sec();
     }
 }
 
-void GPIOController::set_busy(bool s) {
-    std::string cmd = s ? SerialConfig::CMD_BUSY_ON : SerialConfig::CMD_BUSY_OFF;
-    if (!send_command(cmd)) {
-        log_msg(LOG_WARNING, "UART>> %s FAILED", cmd.c_str());
+void GPIOController::clear_result() {
+    log_msg(LOG_WARNING, "GPIO>> RESULT_OFF");
+    command_ok("RESULT WAIT");
+}
+
+bool GPIOController::trigger_active() const {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    return trigger_high_;
+}
+
+void GPIOController::finish_result_cycle() {
+    const int hold_ms = env_int("JETSON_INSPECT_PLC_RESULT_HOLD_MS",
+                                env_int("OPENCV_TAIL_PLC_RESULT_HOLD_MS", kDefaultResultHoldMs));
+    const double elapsed_ms = result_on_time_ > 0.0 ? (now_sec() - result_on_time_) * 1000.0 : 0.0;
+    log_msg(LOG_WARNING, "PLC handshake: holding result for %dms before RESULT_OFF", hold_ms);
+    if (elapsed_ms < hold_ms) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(hold_ms - static_cast<int>(elapsed_ms)));
     }
+
+    clear_result();
+}
+
+void GPIOController::set_busy(bool s) {
+    log_msg(LOG_WARNING, "GPIO>> BUSY_%s", s ? "ON" : "OFF");
+    command_ok(s ? "BUSY 1" : "BUSY 0");
 }
 
 bool GPIOController::has_pending_trigger() const {
@@ -351,25 +363,14 @@ double GPIOController::consume_trigger() {
 
 bool GPIOController::toggle_light() {
     light_on_ = !light_on_;
-    send_command(light_on_ ? SerialConfig::CMD_LIGHT_ON : SerialConfig::CMD_LIGHT_OFF);
+    log_msg(LOG_WARNING, "GPIO light toggle requested, but no Jetson light pin is configured");
     return light_on_;
 }
 
 void GPIOController::light_off() {
     light_on_ = false;
-    send_command(SerialConfig::CMD_LIGHT_OFF);
 }
 
 void GPIOController::cleanup() {
-    listening_ = false;
-    cmd_cv_.notify_all();
-    if (uart_listener_thread_.joinable()) uart_listener_thread_.join();
-    if (uart_writer_thread_.joinable()) uart_writer_thread_.join();
-    light_off();
-    send_command(SerialConfig::CMD_BUSY_OFF);
-    std::unique_lock<std::timed_mutex> lock(serial_write_lock_, std::defer_lock);
-    if (lock.try_lock_for(std::chrono::milliseconds(200))) {
-        int old_fd = serial_fd_.exchange(-1);
-        if (old_fd >= 0) ::close(old_fd);
-    }
+    close_process();
 }

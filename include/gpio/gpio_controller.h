@@ -1,30 +1,37 @@
 // -*- coding: utf-8 -*-
-// gpio/gpio_controller.h — UART GPIO via ESP32 bridge
-// Interface-first: Vision calls this, không biết cụ thể UART hay gì
+// gpio/gpio_controller.h — PLC GPIO via Python helper
+// Interface-first: Vision calls this, không biết cụ thể GPIO backend là gì
 #pragma once
 
-#include <string>
 #include <deque>
 #include <mutex>
-#include <thread>
 #include <atomic>
-#include <condition_variable>
+#include <thread>
+#include <string>
 
 // ══════════════════════════════════════════════════════
-// GPIOController — async UART writer + trigger listener
+// GPIOController — OK/NG/BUSY output + PLC trigger input through helper process
 // ══════════════════════════════════════════════════════
 class GPIOController {
 public:
     GPIOController();
     ~GPIOController();
 
-    // Signal OK or NG to PLC (CRITICAL PATH — direct UART, not queued)
+    // Signal OK or NG to PLC.
     void signal_result(int pin);
 
-    // Set BUSY state in-order with OK/NG result pulses
+    // Clear both result outputs.
+    void clear_result();
+
+    // Pulse OK/NG long enough for PLC scan, then clear the result outputs.
+    void finish_result_cycle();
+
+    bool trigger_active() const;
+
+    // Set BUSY state in-order with OK/NG result handshakes.
     void set_busy(bool state);
 
-    // Trigger queue — filled by UART listener thread
+    // Trigger queue — filled by PLC trigger input on Jetson BOARD pin 22.
     bool   has_pending_trigger() const;
     double consume_trigger();        // Returns trigger timestamp
 
@@ -37,24 +44,25 @@ public:
     bool light_on_ = true;
 
 private:
-    bool send_command(const std::string& cmd);
-    bool reopen_serial();
-    void enqueue_command(const std::string& cmd);
-    void start_uart_listener();
-    void start_uart_writer();
+    bool start_gpio_worker();
+    bool request(const std::string& command, std::string& response, int timeout_ms = 500);
+    bool command_ok(const std::string& command);
+    bool read_trigger(bool& high);
+    void start_worker();
+    void stop_worker();
+    void worker_loop();
+    void close_process();
 
-    std::atomic<int> serial_fd_{-1};
-    std::timed_mutex serial_write_lock_;
-    std::thread uart_listener_thread_;
+    int in_fd_ = -1;
+    int out_fd_ = -1;
+    std::atomic<bool> worker_running_{false};
+    std::thread worker_;
+    int child_pid_ = -1;
+    std::mutex io_mutex_;
+    mutable std::mutex state_mutex_;
     std::deque<double> trigger_queue_;
     mutable std::mutex trigger_mutex_;
-    std::atomic<bool>   listening_{true};
-    std::atomic<double> last_uart_rx_{0.0};
-    std::atomic<double> last_trigger_enqueue_{0.0};
-
-    // Async command queue for non-critical commands (PING, STATUS)
-    std::thread   uart_writer_thread_;
-    std::mutex    cmd_mutex_;
-    std::condition_variable cmd_cv_;
-    std::deque<std::string> cmd_queue_;
+    bool trigger_high_ = false;
+    double result_on_time_ = 0.0;
+    bool mock_mode_ = false;
 };

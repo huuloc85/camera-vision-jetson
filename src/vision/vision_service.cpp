@@ -8,6 +8,7 @@
 #include <chrono>
 #include <thread>
 #include <cmath>
+#include <cstdio>
 #include <unistd.h>
 #include <fcntl.h>
 #include <cerrno>
@@ -22,9 +23,15 @@ struct ScopedBusySignal {
         gpio_.set_busy(true);
     }
     ~ScopedBusySignal() {
+        release();
+    }
+    void release() {
+        if (!active_) return;
         gpio_.set_busy(false);
+        active_ = false;
     }
     GPIOController& gpio_;
+    bool active_ = true;
 };
 
 // ══════════════════════════════════════════════════════
@@ -47,10 +54,11 @@ VisionService::VisionService()
     }
 
     watchdog_heartbeat_.store(now_sec());
-    last_capture_time_    = now_sec();
-    last_trigger_activity_ = now_sec();
+    last_capture_time_.store(now_sec());
+    last_trigger_activity_.store(now_sec());
 
     start_watchdog();
+    start_frame_acquisition();
     start_camera_keepalive();
 }
 
@@ -60,7 +68,9 @@ bool VisionService::start() { return camera_.is_running(); }
 
 void VisionService::stop() {
     running_ = false;
+    latest_frame_cv_.notify_all();
     if (watchdog_thread_.joinable()) watchdog_thread_.join();
+    if (frame_acquire_thread_.joinable()) frame_acquire_thread_.join();
     if (camera_keepalive_thread_.joinable()) camera_keepalive_thread_.join();
     gpio.cleanup();
     camera_.close();
@@ -85,38 +95,78 @@ void VisionService::request_auto_restart() {
 // ══════════════════════════════════════════════════════
 // Frame capture helpers
 // ══════════════════════════════════════════════════════
-cv::Mat VisionService::safe_capture(bool flush) {
-    const int MAX_RETRIES = 3;
-    for (int attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        std::unique_lock<std::timed_mutex> lock(cam_lock_, std::defer_lock);
-        if (!lock.try_lock_for(std::chrono::milliseconds(
-                (int)(DetectionConfig::CAPTURE_TIMEOUT * 1000))))
-            continue;
+cv::Mat VisionService::safe_capture(bool flush, double min_frame_time,
+                                    int fresh_wait_ms) {
+    (void)flush;
+    const auto timeout = std::chrono::milliseconds(
+        (int)(DetectionConfig::CAPTURE_TIMEOUT * 1000));
+    auto deadline = std::chrono::steady_clock::now() + timeout;
 
-        if (flush && DetectionConfig::CAPTURE_FLUSH_COUNT > 0) {
-            for (int i = 0; i < DetectionConfig::CAPTURE_FLUSH_COUNT; i++) {
-                cv::Mat junk = camera_.capture();
-                if (junk.empty()) break;
-            }
-            if (DetectionConfig::CAPTURE_SETTLE_MS > 0)
-                std::this_thread::sleep_for(
-                    std::chrono::milliseconds(DetectionConfig::CAPTURE_SETTLE_MS));
-        }
+    std::unique_lock<std::mutex> lock(latest_frame_mutex_);
+    auto frame_is_fresh = [&]() {
+        return !latest_frame_.empty() &&
+               (min_frame_time <= 0.0 || latest_frame_time_ >= min_frame_time);
+    };
 
-        cv::Mat frame = camera_.capture();
-        if (!frame.empty()) {
-            last_capture_time_ = now_sec();
-            return frame;
-        }
-        log_msg(LOG_WARNING, "Camera capture failed (%d/%d)", attempt, MAX_RETRIES);
-        sleep_sec(0.1);
+    if (frame_is_fresh()) {
+        last_capture_time_.store(latest_frame_time_);
+        return latest_frame_;
     }
 
-    log_msg(LOG_ERROR, "Camera %d attempts failed -> recovery", MAX_RETRIES);
+    if (min_frame_time > 0.0 && fresh_wait_ms > 0) {
+        auto fresh_deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(fresh_wait_ms);
+        latest_frame_cv_.wait_until(lock, fresh_deadline,
+                                    [&]() { return frame_is_fresh() || !running_; });
+        if (frame_is_fresh()) {
+            last_capture_time_.store(latest_frame_time_);
+            return latest_frame_;
+        }
+
+        if (!latest_frame_.empty()) {
+            const double age_ms = (now_sec() - latest_frame_time_) * 1000.0;
+            log_msg(age_ms <= DetectionConfig::TRIGGER_MAX_STALE_FRAME_MS
+                        ? LOG_WARNING
+                        : LOG_ERROR,
+                    "Fresh trigger frame missed; using %.0fms buffered frame",
+                    age_ms);
+            last_capture_time_.store(latest_frame_time_);
+            return latest_frame_;
+        }
+
+        lock.unlock();
+        log_msg(LOG_ERROR, "No buffered trigger frame available -> recovery");
+        if (restart_camera()) {
+            std::lock_guard<std::mutex> retry_lock(latest_frame_mutex_);
+            if (!latest_frame_.empty()) {
+                last_capture_time_.store(latest_frame_time_);
+                return latest_frame_;
+            }
+        }
+        log_msg(LOG_CRITICAL, "Camera all recovery failed");
+        auto_restart();
+        return cv::Mat();
+    }
+
+    while (running_ && !frame_is_fresh()) {
+        if (latest_frame_cv_.wait_until(lock, deadline) == std::cv_status::timeout)
+            break;
+    }
+
+    if (frame_is_fresh()) {
+        last_capture_time_.store(latest_frame_time_);
+        return latest_frame_;
+    }
+
+    lock.unlock();
+
+    log_msg(LOG_ERROR, "No buffered frame available -> recovery");
     if (restart_camera()) {
-        std::lock_guard<std::timed_mutex> lock(cam_lock_);
-        cv::Mat frame = camera_.capture();
-        if (!frame.empty()) { last_capture_time_ = now_sec(); return frame; }
+        std::lock_guard<std::mutex> retry_lock(latest_frame_mutex_);
+        if (!latest_frame_.empty()) {
+            last_capture_time_.store(latest_frame_time_);
+            return latest_frame_;
+        }
     }
     log_msg(LOG_CRITICAL, "Camera all recovery failed");
     auto_restart();
@@ -136,7 +186,7 @@ bool VisionService::restart_camera() {
         watchdog_heartbeat_.store(now_sec());
         if (camera_.start()) {
             sleep_sec(1.0);
-            last_capture_time_ = now_sec();
+            last_capture_time_.store(now_sec());
             log_msg(LOG_WARNING, "Camera recovery OK");
             camera_recovering_ = false;
             return true;
@@ -174,7 +224,7 @@ bool VisionService::wake_camera() {
                 cv::Mat f = camera_.capture();
                 if (f.empty()) break;
             }
-            last_capture_time_ = now_sec();
+            last_capture_time_.store(now_sec());
             keepalive_fail_count_ = 0;
             gpio.toggle_light();
             if (!gpio.light_on_) gpio.toggle_light();
@@ -222,28 +272,61 @@ void VisionService::start_watchdog() {
     });
 }
 
+void VisionService::start_frame_acquisition() {
+    frame_acquire_running_.store(true);
+    frame_acquire_thread_ = std::thread([this]() {
+        while (running_ && frame_acquire_running_.load()) {
+            if (camera_recovering_ || camera_sleeping_ || !camera_.is_running()) {
+                sleep_sec(0.02);
+                continue;
+            }
+
+            std::unique_lock<std::timed_mutex> lock(cam_lock_, std::defer_lock);
+            if (!lock.try_lock_for(std::chrono::milliseconds(
+                    (int)(DetectionConfig::CAPTURE_TIMEOUT * 1000)))) {
+                sleep_sec(0.005);
+                continue;
+            }
+
+            cv::Mat frame = camera_.capture();
+            if (!frame.empty()) {
+                {
+                    std::lock_guard<std::mutex> frame_lock(latest_frame_mutex_);
+                    latest_frame_ = frame;
+                    latest_frame_time_ = now_sec();
+                    last_capture_time_.store(latest_frame_time_);
+                }
+                latest_frame_cv_.notify_all();
+                keepalive_fail_count_ = 0;
+            } else {
+                sleep_sec(0.01);
+            }
+        }
+    });
+}
+
 void VisionService::start_camera_keepalive() {
     camera_keepalive_thread_ = std::thread([this]() {
         while (running_) {
             sleep_sec(0.5);
             if (state.calibration_mode) {
-                last_capture_time_     = now_sec();
-                last_trigger_activity_ = now_sec();
+                last_capture_time_.store(now_sec());
+                last_trigger_activity_.store(now_sec());
                 continue;
             }
             if (camera_recovering_) continue;
             if (camera_sleeping_) continue;
-            if (now_sec() - last_trigger_activity_ >= DetectionConfig::CAMERA_SLEEP_TIMEOUT) {
+            if (now_sec() - last_trigger_activity_.load() >= DetectionConfig::CAMERA_SLEEP_TIMEOUT) {
                 sleep_camera();
-                last_trigger_activity_ = now_sec();
+                last_trigger_activity_.store(now_sec());
                 continue;
             }
-            if (now_sec() - last_capture_time_ >= DetectionConfig::CAMERA_KEEPALIVE_INTERVAL) {
+            if (now_sec() - last_capture_time_.load() >= DetectionConfig::CAMERA_KEEPALIVE_INTERVAL) {
                 std::unique_lock<std::timed_mutex> lock(cam_lock_, std::defer_lock);
                 if (!lock.try_lock()) continue;
                 cv::Mat f = camera_.capture();
                 if (!f.empty()) {
-                    last_capture_time_ = now_sec();
+                    last_capture_time_.store(now_sec());
                     keepalive_fail_count_ = 0;
                 } else {
                     keepalive_fail_count_++;
@@ -251,7 +334,7 @@ void VisionService::start_camera_keepalive() {
                         keepalive_fail_count_ = 0;
                         lock.unlock();
                         restart_camera();
-                        last_trigger_activity_ = now_sec();
+                        last_trigger_activity_.store(now_sec());
                     }
                 }
             }
@@ -277,7 +360,7 @@ VisionService::process_frame_internal(const cv::Mat& frame, bool fast) {
     res.thresh = thresh;
 
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
     if (contours.empty()) {
         res.has_metrics = false;
         res.result      = ProductResult::WAIT;
@@ -334,7 +417,7 @@ VisionService::detect_only(const cv::Mat& frame) {
     auto [gray, thresh] = processor_.preprocess(res.det_roi);
 
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE);
     if (contours.empty()) {
         res.result      = ProductResult::WAIT;
         res.info_text   = "No contour";
@@ -375,47 +458,69 @@ VisionService::detect_only(const cv::Mat& frame) {
 InspectionResult VisionService::process_trigger(double trigger_time) {
     InspectionResult out;
     double t_start = now_sec();
+    double buffered_age_ms = -1.0;
+    {
+        std::lock_guard<std::mutex> lock(latest_frame_mutex_);
+        if (!latest_frame_.empty() && latest_frame_time_ > 0) {
+            buffered_age_ms = (t_start - latest_frame_time_) * 1000.0;
+        }
+    }
     log_msg(LOG_WARNING, ">>> TRIGGER (delay=%.0fms)",
             trigger_time > 0 ? (t_start - trigger_time) * 1000.0 : 0.0);
+    if (buffered_age_ms >= 0.0) {
+        log_msg(LOG_WARNING, "Buffered frame age=%.0fms", buffered_age_ms);
+    }
 
     watchdog_heartbeat_.store(t_start);
-    last_trigger_activity_ = t_start;
+    last_trigger_activity_.store(t_start);
 
     state.transition(AppState::BUSY);
     ScopedBusySignal busy_signal(gpio);
 
     double event_time = (trigger_time > 0) ? trigger_time : t_start;
+    double result_ready_time = 0.0;
+    auto send_result_to_plc = [&](int pin, const char* label) {
+        gpio.signal_result(pin);
+        busy_signal.release();
+        result_ready_time = now_sec();
+        double trigger_to_result_ms = (result_ready_time - event_time) * 1000.0;
+        log_msg(LOG_WARNING, "PLC handshake: %s_ON, BUSY_OFF", label);
+        log_msg(LOG_WARNING, "PLC timing: trigger->%s_READY %.0fms (%.3fs)",
+                label, trigger_to_result_ms, trigger_to_result_ms / 1000.0);
+    };
+    auto finish_result_to_plc = [&](const char* label) {
+        double latch_time = now_sec();
+        double trigger_to_latch_ms = (latch_time - event_time) * 1000.0;
+        log_msg(LOG_WARNING, "PLC handshake: %s latched ON", label);
+        log_msg(LOG_WARNING,
+                "PLC timing: trigger->%s_LATCH %.0fms (%.3fs)",
+                label, trigger_to_latch_ms, trigger_to_latch_ms / 1000.0);
+        gpio.finish_result_cycle();
+        log_msg(LOG_WARNING, "PLC handshake: RESULT_OFF, PLC may release trigger");
+    };
+    auto reject_to_plc = [&](const char* reason, AppState next_state) {
+        log_msg(LOG_ERROR, "%s -> NG", reason);
+        send_result_to_plc(GPIOConfig::PIN_NG, "NG");
+        state.transition(next_state);
+        out.label = "NG";
+        out.result = ProductResult::NG;
+        if (out.info_text.empty()) out.info_text = reason;
+        finish_result_to_plc("NG");
+        return out;
+    };
 
     if (camera_sleeping_) {
         if (!wake_camera()) {
-            log_msg(LOG_ERROR, "Trigger: camera wake failed -> OK");
-            gpio.signal_result(SerialConfig::PIN_OK);
-            state.transition(AppState::IDLE);
-            out.label = "OK"; out.result = ProductResult::OK;
-            return out;
+            return reject_to_plc("Trigger: camera wake failed", AppState::ALARM);
         }
     }
 
     try {
-        double debounce_s = DetectionConfig::TRIGGER_DEBOUNCE_MS / 1000.0;
-        if (event_time - last_trigger_time_ < debounce_s) {
-            log_msg(LOG_WARNING, "Trigger: debounce -> OK");
-            gpio.signal_result(SerialConfig::PIN_OK);
-            last_trigger_time_ = event_time;
-            state.transition(AppState::RESULT_SHOWN);
-            out.label = "OK"; out.result = ProductResult::OK;
-            return out;
-        }
-
         double cap_t0 = now_sec();
-        cv::Mat frame = safe_capture(true);
+        cv::Mat frame = safe_capture(true, event_time,
+                                     DetectionConfig::TRIGGER_FRESH_FRAME_WAIT_MS);
         if (frame.empty()) {
-            log_msg(LOG_ERROR, "Trigger: camera failed -> OK");
-            gpio.signal_result(SerialConfig::PIN_OK);
-            last_trigger_time_ = event_time;
-            state.transition(AppState::IDLE);
-            out.label = "OK"; out.result = ProductResult::OK;
-            return out;
+            return reject_to_plc("Trigger: camera failed", AppState::ALARM);
         }
 
         auto det = detect_only(frame);
@@ -423,23 +528,38 @@ InspectionResult VisionService::process_trigger(double trigger_time) {
         capture_ms_.store(cap_dur * 1000.0);
         capture_fps_.store(cap_dur > 0 ? 1.0 / cap_dur : 0);
 
+        if (det.has_metrics) {
+            log_msg(LOG_WARNING,
+                    "Trigger detect: result=%s spike=%.3f P2=%.3f area=%.0f H=%d info=%s",
+                    det.result == ProductResult::OK ? "OK" :
+                    det.result == ProductResult::NG ? "NG" : "WAIT",
+                    det.metrics.spike_ratio, state.params.min_spike_ratio,
+                    det.metrics.area, det.metrics.height, det.info_text.c_str());
+        } else {
+            log_msg(LOG_WARNING, "Trigger detect: result=WAIT metrics=none info=%s",
+                    det.info_text.c_str());
+        }
+
         if (det.result == ProductResult::WAIT) {
-            log_msg(LOG_WARNING, "Trigger result: WAIT -> OK");
-            gpio.signal_result(SerialConfig::PIN_OK);
-            last_trigger_time_ = event_time;
-            state.transition(AppState::IDLE);
-            out.label = "OK"; out.result = ProductResult::OK;
-            return out;
+            cv::Mat preview_roi = det.det_roi.empty()
+                                    ? processor_.warp_roi_fast(frame)
+                                    : det.det_roi.clone();
+            out.metrics = det.metrics;
+            out.has_metrics = det.has_metrics;
+            out.info_text = det.info_text;
+            out.roi_vis = preview_roi;
+            last_result_frame_ = preview_roi;
+            return reject_to_plc("Trigger result: WAIT", AppState::RESULT_SHOWN);
         }
 
         if (det.result == ProductResult::OK) {
-            gpio.signal_result(SerialConfig::PIN_OK);   // CRITICAL PATH first
+            send_result_to_plc(GPIOConfig::PIN_OK, "OK");   // CRITICAL PATH first
             state.increment_ok();
             log_msg(LOG_WARNING, "Trigger result: OK");
             out.label  = "OK";
             out.result = ProductResult::OK;
         } else {
-            gpio.signal_result(SerialConfig::PIN_NG);
+            send_result_to_plc(GPIOConfig::PIN_NG, "NG");
             state.increment_ng();
             log_msg(LOG_WARNING, "Trigger result: NG");
             out.label  = "NG";
@@ -451,31 +571,45 @@ InspectionResult VisionService::process_trigger(double trigger_time) {
         out.info_text   = det.info_text;
         out.cycle_ms    = cap_dur * 1000.0;
 
-        // Full-res ROI for HMI display (runs AFTER signal_result)
+        finish_result_to_plc(out.label.c_str());
+
+        // HMI rendering runs after PLC handshake; keep the critical path short.
         try {
-            cv::Mat roi_vis = processor_.warp_roi(frame);
-            if (!det.contour.empty()) {
-                std::vector<std::vector<cv::Point>> ctrs = {det.contour};
-                cv::drawContours(roi_vis, ctrs, -1, cv::Scalar(0, 255, 0), 2);
+            cv::Mat preview_roi;
+            if (DetectionConfig::TRIGGER_RENDER_FULL_ROI) {
+                preview_roi = processor_.warp_roi(frame);
+                if (!det.contour.empty()) {
+                    std::vector<std::vector<cv::Point>> ctrs = {det.contour};
+                    cv::drawContours(preview_roi, ctrs, -1, cv::Scalar(0, 255, 0), 2);
+                }
+            } else {
+                preview_roi = det.det_roi.empty()
+                                ? processor_.warp_roi_fast(frame)
+                                : det.det_roi.clone();
+                std::vector<cv::Point> half_contour;
+                half_contour.reserve(det.contour.size());
+                for (const auto& p : det.contour) {
+                    half_contour.emplace_back(p.x / 2, p.y / 2);
+                }
+                if (!half_contour.empty()) {
+                    std::vector<std::vector<cv::Point>> ctrs = {half_contour};
+                    cv::drawContours(preview_roi, ctrs, -1, cv::Scalar(0, 255, 0), 2);
+                }
             }
-            out.roi_vis         = roi_vis;
-            last_result_frame_  = roi_vis;
+            out.roi_vis         = preview_roi;
+            last_result_frame_  = preview_roi;
         } catch (...) {}
 
         state.last_label     = out.label;
         state.last_info_text = out.info_text;
-        last_trigger_time_   = event_time;
 
         state.transition(AppState::RESULT_SHOWN);
         return out;
 
     } catch (std::exception& e) {
-        log_msg(LOG_ERROR, "Trigger error: %s -> OK", e.what());
-        gpio.signal_result(SerialConfig::PIN_OK);
-        last_trigger_time_ = event_time;
-        state.transition(AppState::ALARM);
-        out.label = "OK"; out.result = ProductResult::OK;
-        return out;
+        char reason[160];
+        snprintf(reason, sizeof(reason), "Trigger error: %s", e.what());
+        return reject_to_plc(reason, AppState::ALARM);
     }
 }
 

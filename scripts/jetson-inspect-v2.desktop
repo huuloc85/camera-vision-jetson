@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Jetson Inspect V2
+Comment=Run Jetson Inspect V2 on the local Jetson screen
+Exec=/home/vvp/jetson-inspect-v2/scripts/run_jetson_hmi_with_pinmux.sh
+Path=/home/vvp/jetson-inspect-v2
+Terminal=true
+Icon=utilities-terminal
+Categories=Utility;

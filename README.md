@@ -77,6 +77,128 @@ make -j$(nproc)
 ./jetson_inspect_v2
 ```
 
+## Run HMI on Jetson screen
+
+Run the local screen HMI with the minimal camera/display variables the current code actually uses:
+
+```bash
+DISPLAY=:0 XAUTHORITY=/home/vvp/.Xauthority \
+HMI_FULLSCREEN=0 \
+HMI_WINDOW_NAME=HMI-CAM-0 \
+HMI_WINDOW_X=0 HMI_WINDOW_Y=0 HMI_WINDOW_W=1024 HMI_WINDOW_H=600 \
+OPENCV_TAIL_CAMERA_BACKEND=v4l2 \
+OPENCV_TAIL_CAMERA_INDEX=0 \
+OPENCV_TAIL_CAMERA_WIDTH=1280 \
+OPENCV_TAIL_CAMERA_HEIGHT=720 \
+OPENCV_TAIL_CAMERA_FPS=60 \
+./scripts/run_jetson_hmi.sh
+```
+
+`HMI_FOCUS_*` variables are not used by the current codebase.
+
+## Capture ROI for calibration
+
+To tune ROI directly on the Jetson screen, stop the app and open the ROI editor:
+
+```bash
+cd /home/vvp/jetson-inspect-v2
+sudo pkill -f jetson_inspect_v2 || true
+DISPLAY=:0 XAUTHORITY=/home/vvp/.Xauthority \
+python3 demos/roi_editor_tool.py --width 1280 --height 720 --fps 60
+```
+
+Drag `P1/P2/P3/P4` on the full camera frame. Press `S` to save to
+`config/roi_points.txt`, then restart the main app. The app reads this file on
+startup.
+
+Use this tool to grab the current camera frame and ROI cutout so you can send the images back for ROI tuning:
+
+```bash
+cd /home/vvp/jetson-inspect-v2
+sudo pkill -f jetson_inspect_v2 || true
+python3 demos/capture_roi_tool.py --out debug/roi_captures --width 1280 --height 720 --fps 60
+```
+
+It saves:
+
+- `01_full_frame.jpg`
+- `02_roi_overlay.jpg`
+- `03_roi_warp.jpg`
+- `04_roi_warp_fast.jpg`
+- `05_threshold.jpg`
+- `metadata.txt`
+
+If you want to capture on PLC trigger instead of immediately, add `--wait-trigger`.
+
+## Demo PLC input PNP opto pin 22
+
+App chính đang đọc PLC trigger bằng Jetson.GPIO `BOARD` numbering ở pin 22,
+active-HIGH rising edge. Với flow hiện tại, PLC/opto ON là HIGH, app bật
+`BUSY`, xử lý camera, bật `OK` hoặc `NG`, tắt `BUSY`, rồi giữ `OK/NG` cho tới
+khi trigger nhả về LOW. Không đưa 24V PLC trực tiếp vào GPIO Jetson.
+
+Chạy demo độc lập để test tín hiệu input trước khi mở camera/HMI:
+
+```bash
+cd jetson-inspect-v2
+python3 demos/plc_input_pin22_demo.py --show-state --active-high
+```
+
+cấu hình production hiện tại là active-HIGH, nên khi PLC/opto ON demo cần in
+`state=HIGH` và trigger được nhận ở cạnh LOW -> HIGH. Nếu
+cần test trên máy dev không có Jetson.GPIO:
+
+```bash
+python3 demos/plc_input_pin22_demo.py --mock --duration 1 --show-state --active-high
+```
+
+## Demo PLC output OK / NG / BUSY
+
+App chính xuất tín hiệu PLC bằng Jetson.GPIO `BOARD` numbering:
+
+| Signal | BOARD pin | Logic |
+|---|---:|---|
+| OK | 15 | active-HIGH |
+| NG | 13 | active-HIGH |
+| BUSY | 16 | active-HIGH |
+
+Tắt app chính trước khi test output để tránh tranh chấp GPIO:
+
+```bash
+sudo pkill -f jetson_inspect_v2
+sudo python3 demos/plc_output_3signals_demo.py
+```
+
+Demo sẽ bật `BUSY` lên HIGH để ON, trả LOW để OFF, rồi pulse `OK` và `NG`
+cùng kiểu active-HIGH. Nếu muốn lặp liên tục để đo bằng đồng hồ hoặc xem PLC
+input:
+
+```bash
+sudo python3 demos/plc_output_3signals_demo.py --loop
+```
+
+## Demo Trigger -> OK / NG
+
+Tool này đọc `BOARD 22` rồi trả `OK` hoặc `NG` theo tuỳ chọn, để bạn tách riêng
+kiểm tra opto / trigger input khỏi camera và vision:
+
+```bash
+cd /home/vvp/jetson-inspect-v2
+sudo python3 demos/plc_trigger_response_tool.py --show-state --trigger-active-high --result toggle
+```
+
+Một vài chế độ hay dùng:
+
+```bash
+sudo python3 demos/plc_trigger_response_tool.py --trigger-active-high --result ok
+sudo python3 demos/plc_trigger_response_tool.py --trigger-active-high --result ng
+sudo python3 demos/plc_trigger_response_tool.py --trigger-active-high --result toggle --toggle-start ok
+```
+
+Với cấu hình production hiện tại, chạy tool bằng `--trigger-active-high`. Output
+OK/NG/BUSY là active-HIGH. Nếu muốn test handshake giống app chính, thêm
+`--hold-result-until-release` để giữ OK/NG cho tới khi trigger về LOW.
+
 ## Demo ThingsBoard MQTT + Live Image + RPC
 
 Demo này mô phỏng một Jetson inspection gateway hoàn chỉnh:

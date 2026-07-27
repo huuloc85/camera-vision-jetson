@@ -8,7 +8,7 @@
 //
 // VisionService owns:
 //   LibcameraCapture  (GStreamer pipeline)
-//   GPIOController    (UART ↔ ESP32 ↔ PLC)
+//   GPIOController    (Jetson GPIO → PLC)
 //   ImageProcessor    (warp ROI, threshold, metrics)
 //   ProductClassifier (shape-rule classify)
 //   DetectionState    (state machine + counters)
@@ -54,8 +54,8 @@ int main(int argc, char* argv[]) {
     fprintf(stderr,
         "\n"
         "╔══════════════════════════════════════════════╗\n"
-        "║      jetson-inspect-v2  (UART GPIO build)    ║\n"
-        "║  Vision: camera + ESP32 → PLC               ║\n"
+        "║      jetson-inspect-v2  (Jetson GPIO build)  ║\n"
+        "║  Vision: camera + Jetson GPIO → PLC          ║\n"
         "║  HMI   : OpenCV 1024×600 touch display      ║\n"
         "╚══════════════════════════════════════════════╝\n"
         "\n"
@@ -70,11 +70,17 @@ int main(int argc, char* argv[]) {
     log_msg(LOG_WARNING, "Build: CUDA acceleration DISABLED (CPU-only)");
 #endif
 
-    log_msg(LOG_WARNING, "Config: UART=%s  BAUD=%d",
-            SerialConfig::UART_DEVICE, SerialConfig::BAUD_RATE);
-    log_msg(LOG_WARNING, "Config: Camera %dx%d  MinArea=%.0f  Threshold=%d",
+    log_msg(LOG_WARNING, "Config: GPIO BOARD OK=%d NG=%d BUSY=%d result_active=%s busy_active=%s TRIGGER=%d trigger_active=%s",
+            GPIOConfig::BOARD_OK, GPIOConfig::BOARD_NG,
+            GPIOConfig::BOARD_BUSY,
+            GPIOConfig::OUTPUT_ACTIVE_LOW ? "LOW" : "HIGH",
+            GPIOConfig::BUSY_ACTIVE_LOW ? "LOW" : "HIGH",
+            GPIOConfig::BOARD_TRIGGER,
+            GPIOConfig::TRIGGER_ACTIVE_LOW ? "LOW" : "HIGH");
+    log_msg(LOG_WARNING, "Config: Camera %dx%d@%d  MinArea=%.0f  Threshold=%d",
             DetectionConfig::CAMERA_FRAME_WIDTH,
             DetectionConfig::CAMERA_FRAME_HEIGHT,
+            DetectionConfig::CAMERA_FPS,
             DetectionConfig::MIN_AREA,
             DetectionConfig::FIXED_THRESHOLD);
 

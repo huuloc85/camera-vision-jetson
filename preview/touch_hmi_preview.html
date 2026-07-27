@@ -1,0 +1,696 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Jetson Inspect HMI Preview</title>
+  <style>
+    :root {
+      --bg: #121416;
+      --panel: #1b1f24;
+      --card: #272d34;
+      --divider: #39414b;
+      --divider2: #58606b;
+      --txt: #edf0f4;
+      --txt2: #aab2bd;
+      --dim: #707884;
+      --cyan: #d1b93a;
+      --green: #51cb63;
+      --red: #474ae1;
+      --yellow: #32bef0;
+      --orange: #2d84e6;
+      --ok-bg: #1a4120;
+      --ng-bg: #2a1f56;
+      --wait-bg: #203a46;
+      --btn-blue: #1f5ed4;
+      --btn-green: #1d8f4e;
+      --btn-red: #c64058;
+      --btn-grey: #4a525d;
+      --btn-warn: #9c6a29;
+      --shadow: 0 18px 36px rgba(0,0,0,.24);
+    }
+
+    * { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0;
+      background: #0f1114;
+      color: var(--txt);
+      font-family: Inter, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      display: grid;
+      place-items: center;
+    }
+
+    .shell {
+      width: min(100vw, 1366px);
+      padding: 20px;
+    }
+
+    .toolbar {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 14px;
+      flex-wrap: wrap;
+    }
+
+    .chip, .mode-btn {
+      border: 1px solid var(--divider);
+      background: var(--panel);
+      color: var(--txt);
+      border-radius: 10px;
+      padding: 12px 16px;
+      font: inherit;
+      cursor: pointer;
+      user-select: none;
+    }
+
+    .mode-btn[aria-pressed="true"] {
+      border-color: rgba(209,185,58,.6);
+      box-shadow: 0 0 0 1px rgba(209,185,58,.18) inset;
+    }
+
+    .stage {
+      width: 1024px;
+      height: 600px;
+      margin: 0 auto;
+      position: relative;
+      overflow: hidden;
+      border-radius: 14px;
+      box-shadow: var(--shadow);
+      background: var(--bg);
+      border: 1px solid #222831;
+      transform-origin: top center;
+    }
+
+    .bar-top {
+      height: 52px;
+      background: var(--panel);
+      border-bottom: 2px solid var(--divider2);
+      display: grid;
+      grid-template-columns: 1fr auto;
+      align-items: center;
+      padding: 0 16px 0 18px;
+      gap: 10px;
+    }
+
+    .status-left {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .pulse {
+      width: 12px;
+      height: 12px;
+      border-radius: 999px;
+      background: var(--green);
+      box-shadow: 0 0 0 4px rgba(81,203,99,.14);
+    }
+
+    .badge {
+      height: 38px;
+      background: var(--card);
+      border-radius: 10px;
+      border: 1px solid var(--divider);
+      padding: 0 14px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
+      min-width: 120px;
+    }
+
+    .badge .k { font-size: 10px; color: var(--dim); letter-spacing: .3px; }
+    .badge .v { font-size: 14px; font-weight: 700; color: var(--txt); line-height: 1.05; }
+
+    .stats {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .stat {
+      width: 86px;
+      height: 38px;
+      background: var(--card);
+      border-radius: 10px;
+      border: 1px solid var(--divider);
+      position: relative;
+      padding: 4px 10px 4px 14px;
+      overflow: hidden;
+    }
+    .stat::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 4px;
+      height: 100%;
+      background: var(--txt2);
+    }
+    .stat .k { font-size: 10px; color: var(--dim); }
+    .stat .v { font-size: 16px; font-weight: 800; position: absolute; right: 10px; bottom: 5px; }
+
+    .main {
+      height: calc(600px - 52px - 96px);
+      display: grid;
+      grid-template-columns: 1fr 210px;
+      background: var(--bg);
+    }
+
+    .video {
+      position: relative;
+      background:
+        linear-gradient(135deg, rgba(31,38,46,.94), rgba(16,18,22,.94)),
+        radial-gradient(circle at 35% 35%, rgba(81,203,99,.10), transparent 30%),
+        radial-gradient(circle at 70% 60%, rgba(209,185,58,.12), transparent 28%);
+      border-right: 1px solid #20262d;
+      overflow: hidden;
+    }
+
+    .video::before {
+      content: "CAMERA VIEW";
+      position: absolute;
+      left: 18px;
+      top: 14px;
+      font-size: 12px;
+      color: var(--txt2);
+      letter-spacing: .2px;
+    }
+
+    .video-frame {
+      position: absolute;
+      inset: 42px 20px 20px 20px;
+      border-radius: 10px;
+      border: 1px solid #3a444e;
+      background:
+        linear-gradient(180deg, rgba(255,255,255,.03), rgba(255,255,255,.01)),
+        repeating-linear-gradient(90deg, rgba(255,255,255,.03) 0 1px, transparent 1px 92px),
+        linear-gradient(135deg, #353d46, #15181c 70%);
+      box-shadow: inset 0 0 0 1px rgba(255,255,255,.03);
+    }
+
+    .roi-outline {
+      position: absolute;
+      left: 95px;
+      top: 92px;
+      width: 420px;
+      height: 215px;
+      border: 2px solid rgba(209,185,58,.9);
+      border-radius: 12px;
+      transform: perspective(800px) rotateX(6deg);
+      box-shadow: 0 0 0 1px rgba(209,185,58,.15), 0 0 24px rgba(209,185,58,.12);
+    }
+
+    .product {
+      position: absolute;
+      left: 118px;
+      top: 120px;
+      width: 375px;
+      height: 162px;
+      border-radius: 48px 48px 42px 42px;
+      background: linear-gradient(180deg, #f0f1ee, #b7bcc1 48%, #8d939a);
+      box-shadow: inset 0 0 0 1px rgba(0,0,0,.10), 0 16px 36px rgba(0,0,0,.28);
+      transform: perspective(800px) rotateX(7deg);
+    }
+
+    .product::before {
+      content: "";
+      position: absolute;
+      left: 50%;
+      top: 14px;
+      width: 84px;
+      height: 14px;
+      transform: translateX(-50%);
+      border-radius: 999px;
+      background: rgba(88,95,103,.35);
+    }
+
+    .product::after {
+      content: "";
+      position: absolute;
+      right: 24px;
+      top: 24px;
+      width: 26px;
+      height: 114px;
+      border-radius: 999px;
+      background: rgba(45,132,230,.55);
+      box-shadow: -54px 0 0 rgba(45,132,230,.18);
+    }
+
+    .hmi-note {
+      position: absolute;
+      left: 18px;
+      bottom: 16px;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      color: var(--txt2);
+      font-size: 12px;
+    }
+
+    .dot { width: 8px; height: 8px; border-radius: 999px; background: var(--green); }
+
+    .panel {
+      background: var(--panel);
+      border-left: 1px solid var(--divider);
+      display: flex;
+      flex-direction: column;
+    }
+
+    .panel-head {
+      height: 48px;
+      display: flex;
+      align-items: center;
+      padding: 0 14px;
+      color: var(--dim);
+      font-size: 11px;
+      letter-spacing: .35px;
+      border-bottom: 1px solid var(--divider);
+    }
+
+    .result-box {
+      flex: 1;
+      padding: 10px 12px;
+      background: linear-gradient(180deg, var(--ok-bg), #18301f 22%, #171b20 22%, #171b20 100%);
+      border-left: 6px solid var(--green);
+      display: flex;
+      flex-direction: column;
+      justify-content: flex-start;
+      gap: 8px;
+    }
+
+    .result-box.ng { background: linear-gradient(180deg, var(--ng-bg), #22192f 22%, #171b20 22%, #171b20 100%); border-left-color: var(--red); }
+    .result-box.wait { background: linear-gradient(180deg, var(--wait-bg), #1a2730 22%, #171b20 22%, #171b20 100%); border-left-color: var(--yellow); }
+
+    .result-title { font-size: 11px; color: var(--dim); }
+    .result-label { font-size: 52px; font-weight: 900; line-height: .92; text-align: center; margin-top: 20px; }
+    .result-info { font-size: 13px; color: var(--txt2); line-height: 1.55; }
+
+    .metric-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-top: 6px;
+    }
+
+    .metric {
+      background: var(--card);
+      border: 1px solid var(--divider);
+      border-radius: 10px;
+      padding: 8px 10px;
+    }
+    .metric .k { font-size: 10px; color: var(--dim); }
+    .metric .v { font-size: 16px; font-weight: 800; margin-top: 4px; }
+
+    .config {
+      margin-top: auto;
+      padding-top: 10px;
+      border-top: 1px solid var(--divider);
+    }
+
+    .config-row {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 0;
+      font-size: 12px;
+      color: var(--txt2);
+    }
+
+    .config-row strong { color: var(--txt); }
+
+    .bottom {
+      height: 96px;
+      background: var(--panel);
+      border-top: 2px solid var(--divider2);
+      display: flex;
+      align-items: center;
+      padding: 12px;
+      gap: 12px;
+    }
+
+    .big-btn {
+      height: 64px;
+      border: 0;
+      border-radius: 12px;
+      color: #fff;
+      font: inherit;
+      font-weight: 800;
+      padding: 0 18px;
+      cursor: pointer;
+      box-shadow: inset 0 1px 0 rgba(255,255,255,.08);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      text-align: center;
+      user-select: none;
+      white-space: nowrap;
+    }
+
+    .big-btn.check { background: linear-gradient(180deg, #c68c2b, #8b6118); width: 190px; }
+    .big-btn.light { background: linear-gradient(180deg, #29a14e, #176432); width: 120px; }
+    .big-btn.reset { background: linear-gradient(180deg, #5a6270, #404650); width: 120px; }
+    .big-btn.min { background: linear-gradient(180deg, #56606d, #3c434d); width: 132px; }
+    .big-btn.exit { background: linear-gradient(180deg, #cc5365, #8f2437); width: 190px; margin-left: auto; }
+
+    .exit-progress {
+      height: 6px;
+      margin-top: 10px;
+      border-radius: 999px;
+      background: rgba(255,255,255,.08);
+      overflow: hidden;
+    }
+    .exit-progress span {
+      display: block;
+      width: 58%;
+      height: 100%;
+      background: linear-gradient(90deg, #ff7f93, #db3550);
+      border-radius: inherit;
+    }
+
+    .calib .main {
+      grid-template-columns: 1fr;
+    }
+    .calib .panel { display: none; }
+    .calib #mainBar { display: none; }
+    .calib #calibBar { display: flex !important; }
+
+    .keypad {
+      position: absolute;
+      inset: 32px 40px 32px 40px;
+      border-radius: 14px;
+      background: rgba(24,28,33,.96);
+      border: 1px solid var(--divider);
+      box-shadow: var(--shadow);
+      display: none;
+      padding: 16px 18px 18px;
+    }
+
+    .keypad.show { display: block; }
+
+    .keypad .title {
+      font-size: 30px;
+      font-weight: 900;
+      color: var(--cyan);
+      margin-bottom: 12px;
+    }
+    .keypad .field {
+      height: 58px;
+      border-radius: 12px;
+      border: 1px solid var(--divider);
+      background: var(--card);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 32px;
+      font-weight: 900;
+      letter-spacing: 4px;
+      margin-bottom: 10px;
+    }
+    .keypad .warn {
+      min-height: 24px;
+      color: #ff647c;
+      font-size: 14px;
+      margin-bottom: 8px;
+    }
+
+    .keys {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 12px;
+    }
+
+    .key {
+      height: 66px;
+      border-radius: 12px;
+      border: 1px solid var(--divider);
+      background: var(--card);
+      color: var(--txt);
+      font: inherit;
+      font-weight: 900;
+      font-size: 24px;
+      cursor: pointer;
+      position: relative;
+      overflow: hidden;
+    }
+    .key::before {
+      content: "";
+      position: absolute;
+      left: 0;
+      top: 0;
+      width: 8px;
+      height: 100%;
+      background: var(--btn-grey);
+    }
+    .key.digit::before { background: var(--btn-grey); }
+    .key.del::before { background: #db5f48; }
+    .key.ok::before { background: #31a04f; }
+
+    .key.bottom {
+      margin-top: 14px;
+      width: 100%;
+      height: 44px;
+      font-size: 18px;
+      background: linear-gradient(180deg, #4b535d, #343a43);
+    }
+
+    .hint {
+      margin-top: 12px;
+      color: var(--txt2);
+      font-size: 12px;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .hidden { display: none !important; }
+
+    @media (max-width: 1100px) {
+      .shell { padding: 12px; }
+      .stage { transform: scale(calc((100vw - 24px) / 1024)); transform-origin: top center; }
+      body { height: auto; overflow-x: hidden; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <div class="toolbar">
+      <button class="mode-btn" data-mode="normal" aria-pressed="true">Màn chính</button>
+      <button class="mode-btn" data-mode="calib" aria-pressed="false">Calibration</button>
+      <button class="chip" id="toggleResult">Đổi OK/NG</button>
+    </div>
+
+    <div class="stage" id="stage">
+      <div class="bar-top">
+        <div class="status-left">
+          <div class="pulse"></div>
+          <div class="badge">
+            <div class="k">STATE</div>
+            <div class="v" id="stateText">READY</div>
+          </div>
+          <div class="badge">
+            <div class="k">MODE</div>
+            <div class="v" id="modeText">PLC MODE</div>
+          </div>
+          <div class="badge">
+            <div class="k">TEMP</div>
+            <div class="v">49.8 C</div>
+          </div>
+        </div>
+        <div class="stats">
+          <div class="stat"><div class="k">RATE</div><div class="v">1.0s/p</div></div>
+          <div class="stat"><div class="k">OK</div><div class="v" id="okCount">42</div></div>
+          <div class="stat"><div class="k">NG</div><div class="v" id="ngCount">3</div></div>
+          <div class="stat"><div class="k">TOTAL</div><div class="v" id="totalCount">45</div></div>
+        </div>
+      </div>
+
+      <div class="main">
+        <div class="video">
+          <div class="video-frame">
+            <div class="product"></div>
+            <div class="roi-outline"></div>
+            <div class="hmi-note"><span class="dot"></span>Camera feed preview</div>
+          </div>
+        </div>
+        <div class="panel">
+          <div class="panel-head">RESULT</div>
+          <div class="result-box" id="resultBox">
+            <div class="result-label" id="resultLabel">OK</div>
+            <div class="result-info" id="resultInfo">OK len:12/H:45px r:0.15</div>
+            <div class="metric-grid">
+              <div class="metric"><div class="k">LEN</div><div class="v">12</div></div>
+              <div class="metric"><div class="k">H</div><div class="v">45px</div></div>
+              <div class="metric"><div class="k">R</div><div class="v">0.15</div></div>
+              <div class="metric"><div class="k">AREA</div><div class="v">12345</div></div>
+            </div>
+            <div class="config">
+              <div class="result-title">CONFIG</div>
+              <div class="config-row"><span>Area</span><strong>2500</strong></div>
+              <div class="config-row"><span>Spike</span><strong>0.05</strong></div>
+              <div class="config-row"><span>Thr</span><strong>170</strong></div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div class="bottom" id="mainBar">
+        <button class="big-btn check">CAN CHINH</button>
+        <button class="big-btn light">DEN</button>
+        <button class="big-btn reset">RESET</button>
+        <button class="big-btn min">THU NHO</button>
+        <button class="big-btn exit">THOAT
+          <div class="exit-progress"><span></span></div>
+        </button>
+      </div>
+
+      <div class="bottom hidden" id="calibBar">
+        <button class="big-btn reset" style="width:132px">&lt;- LAI</button>
+        <button class="big-btn reset" style="width:112px">RESET TS</button>
+        <button class="big-btn light" style="width:104px;background:linear-gradient(180deg,#a56a31,#734619)">THRESH</button>
+        <button class="big-btn light" style="width:94px">DEN</button>
+        <button class="big-btn reset" style="width:72px">P1</button>
+        <button class="big-btn reset" style="width:72px">P2</button>
+        <button class="big-btn reset" style="width:72px">P3</button>
+        <button class="big-btn reset" style="width:108px;margin-left:auto">-</button>
+        <button class="big-btn check" style="width:108px">+</button>
+      </div>
+
+      <div class="keypad" id="keypad">
+        <div class="title">MAT KHAU</div>
+        <div class="field">••••</div>
+        <div class="warn">Sai mật khẩu sẽ báo ngay tại đây.</div>
+        <div class="keys">
+          <button class="key digit">1</button>
+          <button class="key digit">2</button>
+          <button class="key digit">3</button>
+          <button class="key digit">4</button>
+          <button class="key digit">5</button>
+          <button class="key digit">6</button>
+          <button class="key digit">7</button>
+          <button class="key digit">8</button>
+          <button class="key digit">9</button>
+          <button class="key del">DEL</button>
+          <button class="key digit">0</button>
+          <button class="key ok">OK</button>
+        </div>
+        <button class="key bottom">HUY</button>
+        <div class="hint"><span>Keypad lớn hơn để bấm được trên màn 7 inch.</span><span>Đây là bản xem trước HTML, chưa phải app thật.</span></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const stage = document.getElementById('stage');
+    const resultBox = document.getElementById('resultBox');
+    const resultLabel = document.getElementById('resultLabel');
+    const resultInfo = document.getElementById('resultInfo');
+    const modeText = document.getElementById('modeText');
+    const stateText = document.getElementById('stateText');
+    const keypad = document.getElementById('keypad');
+    const mainBar = document.getElementById('mainBar');
+    const calibBar = document.getElementById('calibBar');
+    const passwordField = keypad.querySelector('.field');
+    const passwordWarn = keypad.querySelector('.warn');
+    let passwordInput = '';
+    const passwordExpected = '1234';
+
+    const modes = [...document.querySelectorAll('.mode-btn')];
+    function closePassword() {
+      keypad.classList.remove('show');
+      passwordInput = '';
+      passwordField.textContent = '••••';
+      passwordWarn.textContent = 'Sai mật khẩu sẽ báo ngay tại đây.';
+    }
+
+    function setMode(mode) {
+      modes[0].setAttribute('aria-pressed', String(mode === 'normal'));
+      modes[1].setAttribute('aria-pressed', String(mode === 'calib'));
+      stage.classList.toggle('calib', mode === 'calib');
+      closePassword();
+      if (mode === 'normal') {
+        modeText.textContent = 'PLC MODE';
+        stateText.textContent = 'READY';
+      } else if (mode === 'calib') {
+        modeText.textContent = 'CALIBRATION';
+        stateText.textContent = 'BUSY';
+      }
+    }
+
+    function openPassword() {
+      closePassword();
+      stage.classList.remove('calib');
+      keypad.classList.add('show');
+      modes[0].setAttribute('aria-pressed', 'false');
+      modes[1].setAttribute('aria-pressed', 'false');
+      modeText.textContent = 'LOCKED';
+      stateText.textContent = 'READY';
+    }
+
+    modes[0].addEventListener('click', () => setMode('normal'));
+    modes[1].addEventListener('click', openPassword);
+
+    let ok = true;
+    document.getElementById('toggleResult').addEventListener('click', () => {
+      ok = !ok;
+      resultBox.classList.toggle('ng', !ok);
+      resultBox.classList.toggle('wait', false);
+      resultLabel.textContent = ok ? 'OK' : 'NG';
+      resultInfo.textContent = ok ? 'OK len:12/H:45px r:0.15' : 'SPIKE len:12/H:45px r:0.15';
+      document.getElementById('okCount').textContent = ok ? '42' : '41';
+      document.getElementById('ngCount').textContent = ok ? '3' : '4';
+      document.getElementById('totalCount').textContent = ok ? '45' : '45';
+    });
+
+    mainBar.querySelector('.check').addEventListener('click', openPassword);
+    mainBar.querySelector('.light').addEventListener('click', () => {});
+    mainBar.querySelector('.reset').addEventListener('click', () => {});
+    mainBar.querySelector('.min').addEventListener('click', () => {});
+    mainBar.querySelector('.exit').addEventListener('click', () => {});
+
+    const calibButtons = calibBar.querySelectorAll('button');
+    calibButtons[0].addEventListener('click', () => setMode('normal'));
+    calibButtons[1].addEventListener('click', () => {});
+    calibButtons[2].addEventListener('click', () => {});
+    calibButtons[3].addEventListener('click', () => {});
+    calibButtons[4].addEventListener('click', () => {});
+    calibButtons[5].addEventListener('click', () => {});
+    calibButtons[6].addEventListener('click', () => {});
+    calibButtons[7].addEventListener('click', () => {});
+    calibButtons[8].addEventListener('click', () => {});
+
+    keypad.querySelector('.bottom').addEventListener('click', () => {
+      closePassword();
+      setMode('normal');
+    });
+
+    keypad.querySelector('.ok').addEventListener('click', () => {
+      if (passwordInput === passwordExpected) {
+        closePassword();
+        setMode('calib');
+      } else {
+        passwordInput = '';
+        passwordField.textContent = '';
+        passwordWarn.textContent = 'SAI MAT KHAU';
+      }
+    });
+
+    keypad.querySelector('.del').addEventListener('click', () => {
+      passwordInput = passwordInput.slice(0, -1);
+      passwordField.textContent = '•'.repeat(passwordInput.length) || '••••';
+    });
+    keypad.querySelectorAll('.digit').forEach(btn => btn.addEventListener('click', () => {
+      if (passwordInput.length < 8) {
+        passwordInput += btn.textContent.trim();
+        passwordField.textContent = '•'.repeat(passwordInput.length);
+      }
+    }));
+
+    setMode('normal');
+  </script>
+</body>
+</html>

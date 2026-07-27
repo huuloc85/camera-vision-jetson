@@ -186,11 +186,11 @@ void processCommand(const char* cmd) {
 // ── LOOP ─────────────────────────────────────────────────
 
 void loop() {
-  // 1. BUSY watchdog — fail-safe OK if Jetson doesn't respond
+  // 1. BUSY watchdog — fail closed if Jetson doesn't respond
   if (busyAsserted && millis() - busySinceMs >= RESULT_TIMEOUT_MS) {
     timeoutCount++;
-    JetsonSerial.println("ESP32 ERR TIMEOUT->OK");
-    setResult(PIN_OK);  // Fail-safe: assert OK + release BUSY
+    JetsonSerial.println("ESP32 ERR TIMEOUT->NG");
+    setResult(PIN_NG);  // Reject product and release BUSY
   }
 
   // 2. Forward PLC triggers to Jetson

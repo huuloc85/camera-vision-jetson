@@ -14,7 +14,7 @@ std::string DetectionParams::adjust(bool increase) {
     ParamDef defs[] = {
         {&min_area,        nullptr,    50,   50,   false},
         {&min_spike_ratio, nullptr,    0.01, 0.00, false},
-        {nullptr,          &threshold, 5,    50,   true },
+        {nullptr,          &threshold, 5,    0,    true },
     };
 
     if (selected_param < 0 || selected_param >= 3) return "";

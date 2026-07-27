@@ -1,0 +1,6 @@
+# ROI source points in 1920x1080 reference coordinates.
+# Order: P1 top-left, P2 top-right, P3 bottom-right, P4 bottom-left.
+604,421
+1327,403
+1338,943
+595,973

@@ -4,6 +4,7 @@
 #pragma once
 
 #include <opencv2/opencv.hpp>
+#include <array>
 #include <string>
 #include <vector>
 #include <deque>
@@ -63,7 +64,7 @@ struct InspectionResult {
     std::string   info_text;      // e.g. "OK len:12/H:45px r:0.15"
     ShapeMetrics  metrics;
     bool          has_metrics = false;
-    cv::Mat       roi_vis;        // Full-res visual for HMI display
+    cv::Mat       roi_vis;        // Visual frame published to the HMI
     cv::Mat       thresh;         // Threshold debug image
     double        cycle_ms   = 0; // Processing time in ms
 };
@@ -81,6 +82,24 @@ struct DetectionParams {
     std::string adjust(bool increase);
     void reset();
     std::string summary() const;
+};
+
+// ══════════════════════════════════════════════════════
+// ROI Parameters — four corners in 1920×1080 reference coordinates
+// P1=top-left, P2=top-right, P3=bottom-right, P4=bottom-left
+// ══════════════════════════════════════════════════════
+struct RoiParams {
+    static constexpr int REF_WIDTH  = 1920;
+    static constexpr int REF_HEIGHT = 1080;
+
+    std::array<cv::Point2f, 4> points{{
+        {604.0f, 421.0f}, {1327.0f, 403.0f},
+        {1338.0f, 943.0f}, {595.0f, 973.0f}
+    }};
+    int selected_edge = 0; // 0=top, 1=right, 2=bottom, 3=left
+
+    void reset();
+    bool valid() const;
 };
 
 // ══════════════════════════════════════════════════════

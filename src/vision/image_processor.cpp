@@ -8,32 +8,13 @@
 #include <cmath>
 
 // ── ImageProcessor ───────────────────────────────────
-ImageProcessor::ImageProcessor(const DetectionParams &params)
-    : params_(params) {
+ImageProcessor::ImageProcessor(const DetectionParams &params, const RoiParams& roi)
+    : params_(params), roi_(roi) {
   morph_kernel_ = cv::getStructuringElement(cv::MORPH_ELLIPSE, {5, 5});
   morph_kernel_large_ = cv::getStructuringElement(cv::MORPH_ELLIPSE, {7, 7});
   morph_kernel_xl_ = cv::getStructuringElement(cv::MORPH_ELLIPSE, {9, 9});
 
   sharpen_kernel_ = (cv::Mat_<float>(3, 3) << 0, -1, 0, -1, 5, -1, 0, -1, 0);
-
-  // Perspective transform: 1920×1080 → 1080×804
-  std::vector<cv::Point2f> roi_pts = {
-      {604, 421}, {1327, 403}, {1338, 943}, {595, 973}};
-  if (DetectionConfig::ROTATE_ROI_180 &&
-      DetectionConfig::ROTATE_ROI_USING_SRC_REMAP) {
-    for (auto &p : roi_pts) {
-      p.x = (float)(DetectionConfig::CAMERA_FRAME_WIDTH - 1) - p.x;
-      p.y = (float)(DetectionConfig::CAMERA_FRAME_HEIGHT - 1) - p.y;
-    }
-  }
-  std::vector<cv::Point2f> dst_pts = {{0, 0}, {1080, 0}, {1080, 804}, {0, 804}};
-  M_ = cv::getPerspectiveTransform(roi_pts, dst_pts);
-
-  // Half-res: 540×402
-  std::vector<cv::Point2f> dst_half;
-  for (auto &p : dst_pts)
-    dst_half.push_back(p * 0.5f);
-  M_half_ = cv::getPerspectiveTransform(roi_pts, dst_half);
 
 #if USE_CUDA_ACCEL
   if (cv::cuda::getCudaEnabledDeviceCount() > 0) {
@@ -60,6 +41,71 @@ ImageProcessor::ImageProcessor(const DetectionParams &params)
 #endif
 }
 
+void ImageProcessor::refresh_roi(const cv::Size& frame_size) {
+  if (frame_size.width > 0 && frame_size.height > 0)
+    rebuild_roi_transforms(frame_size);
+  else {
+    transform_frame_size_ = cv::Size();
+    M_.release();
+    M_half_.release();
+  }
+#if USE_CUDA_ACCEL
+  gpu_roi_cache_valid_ = false;
+#endif
+}
+
+std::array<cv::Point2f, 4>
+ImageProcessor::roi_points_for_frame(const cv::Size& frame_size) const {
+  cv::Size size = frame_size;
+  if (size.width <= 0 || size.height <= 0)
+    size = cv::Size(DetectionConfig::CAMERA_FRAME_WIDTH,
+                    DetectionConfig::CAMERA_FRAME_HEIGHT);
+  std::array<cv::Point2f, 4> points = roi_.points;
+  const float sx = static_cast<float>(size.width) / RoiParams::REF_WIDTH;
+  const float sy = static_cast<float>(size.height) / RoiParams::REF_HEIGHT;
+  for (auto& p : points) {
+    p.x *= sx;
+    p.y *= sy;
+    if (DetectionConfig::ROTATE_ROI_180 &&
+        DetectionConfig::ROTATE_ROI_USING_SRC_REMAP) {
+      p.x = static_cast<float>(size.width - 1) - p.x;
+      p.y = static_cast<float>(size.height - 1) - p.y;
+    }
+  }
+  return points;
+}
+
+cv::Point2f ImageProcessor::reference_point_from_frame(
+    const cv::Point2f& point, const cv::Size& frame_size) const {
+  cv::Point2f p = point;
+  if (DetectionConfig::ROTATE_ROI_180 &&
+      DetectionConfig::ROTATE_ROI_USING_SRC_REMAP) {
+    p.x = static_cast<float>(frame_size.width - 1) - p.x;
+    p.y = static_cast<float>(frame_size.height - 1) - p.y;
+  }
+  p.x *= static_cast<float>(RoiParams::REF_WIDTH) / frame_size.width;
+  p.y *= static_cast<float>(RoiParams::REF_HEIGHT) / frame_size.height;
+  return p;
+}
+
+void ImageProcessor::rebuild_roi_transforms(const cv::Size& frame_size) {
+  const auto points = roi_points_for_frame(frame_size);
+  std::vector<cv::Point2f> src(points.begin(), points.end());
+  std::vector<cv::Point2f> dst = {{0, 0}, {1080, 0}, {1080, 804}, {0, 804}};
+  M_ = cv::getPerspectiveTransform(src, dst);
+  for (auto& p : dst) p *= 0.5f;
+  M_half_ = cv::getPerspectiveTransform(src, dst);
+  transform_frame_size_ = frame_size;
+#if USE_CUDA_ACCEL
+  gpu_roi_cache_valid_ = false;
+#endif
+}
+
+void ImageProcessor::ensure_roi_transforms(const cv::Size& frame_size) {
+  if (M_.empty() || M_half_.empty() || transform_frame_size_ != frame_size)
+    rebuild_roi_transforms(frame_size);
+}
+
 cv::Mat ImageProcessor::sharpen(const cv::Mat &img) {
   cv::Mat result;
   cv::filter2D(img, result, -1, sharpen_kernel_);
@@ -79,12 +125,14 @@ std::pair<cv::Mat, cv::Mat> ImageProcessor::preprocess(const cv::Mat &roi) {
     cv::cuda::cvtColor(gpu_roi_, gpu_gray_, cv::COLOR_BGR2GRAY);
     gpu_gaussian_->apply(gpu_gray_, gpu_blurred_);
     cv::cuda::threshold(gpu_blurred_, gpu_thresh_, t, 255, cv::THRESH_BINARY);
-    gpu_morph_close_large_->apply(gpu_thresh_, gpu_thresh_);
-    gpu_morph_open_xl_->apply(gpu_thresh_, gpu_thresh_);
-    cv::Mat gray, thresh;
-    gpu_gray_.download(gray);
+    // CUDA filters are not guaranteed to support in-place input/output.
+    gpu_morph_close_large_->apply(gpu_thresh_, gpu_morph_);
+    gpu_morph_open_xl_->apply(gpu_morph_, gpu_thresh_);
+    cv::Mat thresh;
     gpu_thresh_.download(thresh);
-    return {gray, thresh};
+    // Detection only needs the binary mask. Avoid downloading the unused
+    // grayscale image from GPU on every trigger.
+    return {cv::Mat(), thresh};
   }
 #endif
 
@@ -126,6 +174,7 @@ std::pair<cv::Mat, cv::Mat> ImageProcessor::preprocess(const cv::Mat &roi) {
 }
 
 cv::Mat ImageProcessor::warp_roi(const cv::Mat &frame) {
+  ensure_roi_transforms(frame.size());
 #if USE_CUDA_ACCEL
   if (use_cuda_) {
     gpu_frame_.upload(frame);
@@ -148,6 +197,7 @@ cv::Mat ImageProcessor::warp_roi(const cv::Mat &frame) {
 }
 
 cv::Mat ImageProcessor::warp_roi_fast(const cv::Mat &frame) {
+  ensure_roi_transforms(frame.size());
 #if USE_CUDA_ACCEL
   if (use_cuda_) {
     gpu_frame_.upload(frame);
@@ -156,9 +206,9 @@ cv::Mat ImageProcessor::warp_roi_fast(const cv::Mat &frame) {
         !DetectionConfig::ROTATE_ROI_USING_SRC_REMAP)
       cv::cuda::flip(gpu_roi_, gpu_roi_, -1);
     gpu_roi_cache_valid_ = true;
-    cv::Mat result;
-    gpu_roi_.download(result);
-    return result;
+    // preprocess() consumes gpu_roi_ directly.  This half-resolution image is
+    // an internal detection buffer, so avoid an unused GPU-to-CPU download.
+    return cv::Mat();
   }
 #endif
   cv::Mat result;

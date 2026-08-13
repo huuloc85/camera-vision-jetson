@@ -20,6 +20,7 @@ public:
 
     // ─── Runtime params (tunable via HMI) ────
     DetectionParams params;
+    RoiParams       roi_params;
 
     // ─── Last result (for HMI display) ───────
     std::string last_label     = "READY";

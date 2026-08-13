@@ -50,6 +50,31 @@ target_link_libraries(jetson_inspect_v2
     pthread
 )
 
+# Enable the CUDA code path only when this exact OpenCV installation exports
+# every module used by ImageProcessor.  CUDA toolkit availability alone is not
+# enough; Ubuntu's stock OpenCV packages are commonly CPU-only on Jetson.
+set(OPENCV_CUDA_MODULES
+    opencv_cudaarithm
+    opencv_cudaimgproc
+    opencv_cudafilters
+    opencv_cudawarping
+)
+set(OPENCV_CUDA_READY TRUE)
+foreach(module IN LISTS OPENCV_CUDA_MODULES)
+    if(NOT TARGET ${module})
+        set(OPENCV_CUDA_READY FALSE)
+    endif()
+endforeach()
+
+if(OPENCV_CUDA_READY)
+    target_compile_definitions(jetson_inspect_v2 PRIVATE JETSON_INSPECT_OPENCV_CUDA=1)
+    target_link_libraries(jetson_inspect_v2 PRIVATE ${OPENCV_CUDA_MODULES})
+    message(STATUS "OpenCV CUDA: ENABLED")
+else()
+    target_compile_definitions(jetson_inspect_v2 PRIVATE JETSON_INSPECT_OPENCV_CUDA=0)
+    message(STATUS "OpenCV CUDA: DISABLED (required CUDA modules not found)")
+endif()
+
 # ── Install rules ─────────────────────────────────────
 install(TARGETS jetson_inspect_v2 DESTINATION bin)
 install(DIRECTORY ${CMAKE_SOURCE_DIR}/config/

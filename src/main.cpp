@@ -34,11 +34,10 @@
 // ══════════════════════════════════════════════════════
 // Signal handling — graceful shutdown on SIGINT / SIGTERM
 // ══════════════════════════════════════════════════════
-static volatile sig_atomic_t g_signal_received = 0;
+volatile sig_atomic_t g_signal_received = 0;
 
 static void signal_handler(int sig) {
     g_signal_received = sig;
-    log_msg(LOG_WARNING, "Signal %d received — shutting down...", sig);
 }
 
 // ══════════════════════════════════════════════════════
@@ -77,6 +76,8 @@ int main(int argc, char* argv[]) {
             DetectionConfig::CAMERA_FRAME_HEIGHT,
             DetectionConfig::MIN_AREA,
             DetectionConfig::FIXED_THRESHOLD);
+    log_msg(LOG_WARNING, "Config: Camera sleep=%s",
+            DetectionConfig::CAMERA_SLEEP_TIMEOUT <= 0.0 ? "DISABLED" : "ENABLED");
 
     // ── Launch application ──────────────────────────
     try {

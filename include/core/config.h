@@ -6,16 +6,14 @@
 #include <opencv2/opencv.hpp>
 
 // ══════════════════════════════════════════════════════
-// CUDA GPU Acceleration (Jetson Nano Maxwell 128-core)
+// CUDA GPU Acceleration (Jetson Orin Nano)
 // ══════════════════════════════════════════════════════
-#if defined(__has_include)
-#  if __has_include(<opencv2/cudaimgproc.hpp>)
+#if defined(JETSON_INSPECT_OPENCV_CUDA) && JETSON_INSPECT_OPENCV_CUDA
 #    include <opencv2/cudaimgproc.hpp>
 #    include <opencv2/cudafilters.hpp>
 #    include <opencv2/cudawarping.hpp>
 #    include <opencv2/cudaarithm.hpp>
 #    define USE_CUDA_ACCEL 1
-#  endif
 #endif
 #ifndef USE_CUDA_ACCEL
 #  define USE_CUDA_ACCEL 0
@@ -28,14 +26,12 @@
 //   Jetson pin 8  (TX) → ESP32 GPIO16 (RX)
 //   Jetson pin 10 (RX) ← ESP32 GPIO17 (TX)
 //   ESP32 GPIO4 = PLC TRIGGER INPUT
-//   ESP32 GPIO5 = OK, GPIO6 = NG, GPIO7 = BUSY, GPIO8 = LIGHT
+//   ESP32 GPIO5 = OK, GPIO6 = NG, GPIO7 = BUSY
 struct SerialConfig {
     static constexpr const char* UART_DEVICE  = "/dev/ttyTHS1";
     static constexpr int         BAUD_RATE    = 115200;
 
     // Commands: Jetson → ESP32
-    static constexpr const char* CMD_LIGHT_ON  = "LIGHT_ON";
-    static constexpr const char* CMD_LIGHT_OFF = "LIGHT_OFF";
     static constexpr const char* CMD_OK_ON     = "OK_ON";
     static constexpr const char* CMD_NG_ON     = "NG_ON";
     static constexpr const char* CMD_BUSY_ON   = "BUSY_ON";
@@ -62,6 +58,9 @@ struct SerialConfig {
 struct DetectionConfig {
     static constexpr int    CAMERA_FRAME_WIDTH          = 1920;
     static constexpr int    CAMERA_FRAME_HEIGHT         = 1080;
+    static constexpr int    CAMERA_FPS                  = 60;
+    static constexpr bool   CAMERA_FOCUS_AUTOMATIC      = true;
+    static constexpr int    CAMERA_FOCUS_ABSOLUTE       = 5;
     static constexpr double MIN_AREA                    = 2500.0;
     static constexpr int    MIN_HEIGHT                  = 80;
     static constexpr double MIN_SOLIDITY                = 0.50;
@@ -69,10 +68,20 @@ struct DetectionConfig {
     static constexpr double WAITING_RENDER_INTERVAL     = 0.2;
     static constexpr double MAIN_LOOP_TIMEOUT           = 15.0;
     static constexpr double CAPTURE_TIMEOUT             = 2.0;
-    static constexpr double CAMERA_KEEPALIVE_INTERVAL   = 2.0;
-    static constexpr double CAMERA_SLEEP_TIMEOUT        = 300.0;
+    // Production runs 24/7. Keep the USB/GStreamer pipeline warm so the first
+    // trigger after a long idle period never has to reopen the decoder.
+    static constexpr double CAMERA_SLEEP_TIMEOUT        = 0.0;
     static constexpr double CAMERA_WAKE_SETTLE          = 1.0;
-    static constexpr int    CAPTURE_FLUSH_COUNT         = 0;
+    static constexpr double LATEST_FRAME_MAX_AGE        = 0.25;
+    // Upper bound only; the condition variable wakes immediately when the
+    // next realtime frame is retrieved and decoded.
+    static constexpr int    LATEST_FRAME_WAIT_MS        = 100;
+    static constexpr int    CAMERA_RESTART_FAIL_COUNT   = 30;
+    // Orin Nano 8GB has six CPU cores; leave headroom for HMI/UART.
+    static constexpr int    OPENCV_NUM_THREADS          = 4;
+    // V4L2 is configured with a single driver buffer; discard that one stale
+    // slot before retrieving the realtime trigger frame.
+    static constexpr int    CAPTURE_FLUSH_COUNT         = 1;
     static constexpr int    CAPTURE_SETTLE_MS           = 0;
     static constexpr int    TRIGGER_DEBOUNCE_MS         = 50;
     static constexpr double SPIKE_RATIO_THRESHOLD       = 0.05;
@@ -81,10 +90,6 @@ struct DetectionConfig {
     static constexpr bool   ROTATE_ROI_180              = false;
     static constexpr bool   ROTATE_ROI_USING_SRC_REMAP  = false;
 
-    // Keep camera frames neutral; thresholding is sensitive to over-brightening.
-    static constexpr double CC_BRIGHTNESS  = 0.0;
-    static constexpr double CC_CONTRAST    = 1.0;
-    static constexpr double CC_SATURATION  = 1.0;
 };
 
 // ══════════════════════════════════════════════════════

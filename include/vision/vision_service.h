@@ -14,6 +14,7 @@
 #include "gpio/gpio_controller.h"
 
 #include <atomic>
+#include <condition_variable>
 #include <mutex>
 #include <thread>
 #include <functional>
@@ -34,6 +35,12 @@ public:
     // Returns result (WAIT = nothing detected yet)
     InspectionResult process_trigger(double trigger_time = 0.0);
     InspectionResult process_frame_for_calibration();
+    InspectionResult process_frame_for_roi_calibration();
+    bool move_roi_edge_from_frame(int edge, const cv::Point2f& delta,
+                                  const cv::Size& frame_size);
+    std::array<cv::Point2f, 4> roi_points_for_frame(const cv::Size& frame_size) const;
+    void save_roi_settings();
+    void reset_roi_settings();
 
     // ─── Accessors (thread-safe reads) ────────────────
     bool has_pending_trigger() const { return gpio.has_pending_trigger(); }
@@ -61,20 +68,26 @@ protected:
     cv::Mat last_result_frame_;
     double  last_render_time_    = 0;
     double  last_trigger_time_   = 0;
-    double  last_capture_time_   = 0;
-    double  last_trigger_activity_ = 0;
-    int     keepalive_fail_count_ = 0;
+    std::atomic<double> last_trigger_activity_{0};
 
     std::atomic<double> watchdog_heartbeat_;
     std::atomic<bool>   camera_recovering_{false};
     std::atomic<bool>   camera_sleeping_{false};
+    std::atomic<bool>   realtime_capture_enabled_{false};
+    std::atomic<bool>   realtime_capture_request_{false};
+    std::atomic<double> realtime_capture_request_time_{0.0};
+    std::mutex          realtime_frame_mutex_;
+    std::condition_variable realtime_frame_cv_;
+    cv::Mat             realtime_frame_;
+    bool                realtime_frame_ready_ = false;
     std::atomic<bool>   cleanup_done_{false};
     std::atomic<bool>   restart_in_progress_{false};
     std::thread watchdog_thread_;
     std::thread camera_keepalive_thread_;
 
     // ─── Camera lifecycle ──────────────────────────────
-    cv::Mat safe_capture(bool flush = true);
+    cv::Mat safe_capture(bool flush = true, bool require_signal = true);
+    cv::Mat request_realtime_frame();
     bool    restart_camera();
     void    sleep_camera();
     bool    wake_camera();

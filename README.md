@@ -77,6 +77,93 @@ make -j$(nproc)
 ./jetson_inspect_v2
 ```
 
+## Jetson Orin: build CUDA riêng (không ghi đè bản đang chạy)
+
+Các script dưới đây phải chạy trên Jetson (`aarch64`), không chạy trên Mac.
+OpenCV CUDA được cài riêng vào `/opt/opencv-cuda`; binary CPU trong `build/` và
+file căn chỉnh `.counter_state.json` không bị thay thế.
+
+```bash
+cd ~/jetson-inspect-v2
+chmod +x scripts/*cuda*.sh
+./scripts/install_opencv_cuda_jetson.sh
+./scripts/build_jetson_cuda.sh
+
+DISPLAY=:0 XAUTHORITY=/home/vvp/.Xauthority \
+./scripts/run_jetson_inspect_cuda.sh
+```
+
+Nếu `nvcc` chưa tồn tại, cài JetPack development trước:
+
+```bash
+sudo apt update
+sudo apt install nvidia-jetpack
+```
+
+Build CUDA dùng kiến trúc Orin `8.7`, mặc định chỉ build 2 job để tránh hết RAM.
+Có thể đổi bằng `OPENCV_BUILD_JOBS=1` hoặc `2`. Khi khởi động đúng, log phải có
+`Build: CUDA acceleration ENABLED`, `Camera realtime capture worker ON` và
+`OpenCV CUDA` trong output `opencv_version --verbose`.
+
+Mỗi trigger publish `HMI freeze: published 1080x804` bằng đúng perspective ROI
+cận sản phẩm giống Calibration mode; frame nền bị bỏ và không đưa lên HMI. Log
+`Trigger timing` tách `critical` (đến GPIO), `hmi_frame` và `total`; log
+`Trigger displayed` đo cả bước đưa ảnh lên cửa sổ. Chỉ coi mục tiêu dưới 50 ms
+là đạt sau khi đo liên tục ít nhất 20 sản phẩm trên Jetson.
+
+HMI dùng cùng template `IndustrialHmiApp` của `opencv-detect`: canvas 1024x600,
+top bar 52 px, bottom touch bar 96 px, panel kết quả phải 190 px và khung camera
+có lề 18 px. Phần giao diện này không thay đổi Vision ROI hay ESP32/UART.
+
+Camera USB lấy cấu hình từ biến môi trường của launcher, tương tự luồng CLI/env
+của `opencv-detect`. Giá trị mặc định production vẫn là `/dev/video0`, MJPG,
+1920x1080 @ 60 FPS và NVIDIA HW-MJPEG; do đó flow trigger/vision/UART không đổi:
+
+```bash
+JETSON_CAM_V4L2_INDEX=0 \
+JETSON_CAM_WIDTH=1920 JETSON_CAM_HEIGHT=1080 JETSON_CAM_FPS=60 \
+JETSON_CAM_FOURCC=MJPG JETSON_CAM_HW_MJPEG=1 \
+./scripts/run_jetson_inspect_cuda.sh
+```
+
+Focus được đọc trực tiếp từ `config/app_config.json` khi camera khởi động:
+
+```json
+"focus_automatic_continuous": true,
+"focus_absolute": 5
+```
+
+Khi autofocus là `true`, chương trình không gửi `focus_absolute`. Khi đổi sang
+`false`, hai control được gửi tuần tự: tắt autofocus trước rồi mới đặt focus,
+tránh lỗi I/O của camera khi gửi chung một lệnh. Nút `Mat Khau: BAT/TAT` trên
+HMI điều khiển bảo vệ phần Căn Chỉnh; nhập đúng chữ số cuối sẽ tự xác nhận,
+không cần nhấn `OK`.
+
+Camera sẽ log mode thực tế sau khi driver negotiate. Để đo riêng tốc độ detect
+giống benchmark của `opencv-detect`, đồng thời kiểm tra latency hiển thị đầy đủ:
+
+```bash
+python3 scripts/analyze_vision_timing.py logs/desktop-launch.log
+```
+
+`Vision equivalent throughput` chỉ là `1000 / detect_avg`; tiêu chí production
+vẫn là `Trigger displayed: max < 50ms` với tối thiểu 20 mẫu.
+
+## Tạo icon chạy HMI trên Desktop Jetson
+
+Chạy bằng user đang đăng nhập màn hình Jetson, không dùng `sudo`:
+
+```bash
+cd ~/jetson-inspect-v2
+chmod +x scripts/*.sh
+./scripts/install_jetson_desktop_icon.sh
+```
+
+Sau đó double-click icon **CAP-INS7A-SPIKE** trên Desktop. Launcher luôn chạy
+binary CUDA `build-cuda/jetson_inspect_v2`, tự đặt `DISPLAY=:0`, dùng
+`~/.Xauthority`, và không cho mở hai HMI cùng lúc. Log khi mở từ icon nằm tại
+`logs/desktop-launch.log`.
+
 ## GitNexus MCP
 
 Project đã được index bằng GitNexus với alias `jetson-inspect-v2`.

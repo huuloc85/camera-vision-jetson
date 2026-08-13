@@ -1,6 +1,6 @@
 {
     "_comment": "jetson-inspect-v2 — Runtime Application Configuration",
-    "_note": "Reference mirror of include/core/config.h. Current C++ build uses compiled constants plus .counter_state.json for tuned detection params.",
+    "_note": "Camera focus controls below are read at startup. Other values mirror include/core/config.h; tuned detection params are stored in .counter_state.json.",
     "uart": {
         "device": "/dev/ttyTHS1",
         "baud_rate": 115200,
@@ -9,11 +9,13 @@
     "camera": {
         "frame_width": 1920,
         "frame_height": 1080,
+        "focus_automatic_continuous": true,
+        "focus_absolute": 5,
         "capture_flush_count": 0,
         "capture_settle_ms": 0,
         "capture_timeout_s": 2.0,
         "keepalive_interval_s": 2.0,
-        "sleep_timeout_s": 300.0,
+        "sleep_timeout_s": 0.0,
         "wake_settle_s": 1.0
     },
     "detection": {
@@ -27,12 +29,6 @@
         "rotate_roi_180": false,
         "rotate_roi_using_src_remap": false,
         "trigger_debounce_ms": 50
-    },
-    "color_correction": {
-        "_comment": "Neutral camera frames for inspection; avoid over-brightening before thresholding",
-        "brightness": 0.0,
-        "contrast": 1.0,
-        "saturation": 1.0
     },
     "timing": {
         "main_loop_timeout_s": 15.0,

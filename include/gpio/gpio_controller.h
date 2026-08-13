@@ -19,31 +19,29 @@ public:
     ~GPIOController();
 
     // Signal OK or NG to PLC (CRITICAL PATH — direct UART, not queued)
-    void signal_result(int pin);
+    bool signal_result(int pin);
 
     // Set BUSY state in-order with OK/NG result pulses
-    void set_busy(bool state);
+    bool set_busy(bool state);
+
+    bool is_connected() const { return connected_.load(); }
 
     // Trigger queue — filled by UART listener thread
     bool   has_pending_trigger() const;
     double consume_trigger();        // Returns trigger timestamp
 
-    // Light control
-    bool toggle_light();
-    void light_off();
-
     void cleanup();
 
-    bool light_on_ = true;
-
 private:
-    bool send_command(const std::string& cmd);
+    bool send_command(const std::string& cmd, int lock_timeout_ms = 200,
+                      int write_timeout_ms = 200);
     bool reopen_serial();
     void enqueue_command(const std::string& cmd);
     void start_uart_listener();
     void start_uart_writer();
 
     std::atomic<int> serial_fd_{-1};
+    std::atomic<bool> connected_{false};
     std::timed_mutex serial_write_lock_;
     std::thread uart_listener_thread_;
     std::deque<double> trigger_queue_;

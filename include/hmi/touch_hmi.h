@@ -38,12 +38,16 @@ struct UIButton {
 // ══════════════════════════════════════════════════════
 class TouchHMI {
 public:
+    enum class CalibPage { VISION, ROI };
+
     static constexpr int W       = 1024;
     static constexpr int H       = 600;
     static constexpr int BAR_H   = 52;
-    static constexpr int BTN_H   = 56;
-    static constexpr int BTN_BAR = 72;
-    static constexpr int BTN_Y   = H - BTN_BAR + 8;
+    static constexpr int BTN_H   = 74;
+    static constexpr int BTN_BAR = 96;
+    static constexpr int BTN_Y   = H - BTN_BAR + 12;
+    static constexpr int RIGHT_PANEL_W = 190;
+    static constexpr int CONTENT_MARGIN = 18;
 
     explicit TouchHMI(VisionService* svc);
 
@@ -55,6 +59,8 @@ public:
     bool handle_password_touch(int x, int y);
     void handle_key(int key);
     bool password_active() const { return password_active_; }
+    bool roi_page_active() const { return calib_page_ == CalibPage::ROI; }
+    bool handle_roi_pointer(int event, int x, int y);
     std::vector<UIButton>& buttons();
 
     // Hold-repeat state for +/- buttons
@@ -63,25 +69,35 @@ public:
     double      repeat_  = 0.12;
 
     std::vector<UIButton> normal_;   // Normal / PLC mode buttons
-    std::vector<UIButton> calib_;    // Calibration mode buttons
+    std::vector<UIButton> calib_;    // Vision calibration mode buttons
+    std::vector<UIButton> roi_calib_; // ROI edge editor buttons
 
 private:
     VisionService* svc_;
     std::string result_label_ = "READY";
     bool        is_minimized_ = false;
+    bool        password_protection_enabled_ = true;
     bool        password_active_ = false;
+    bool        password_disable_pending_ = false;
     std::string password_input_;
     double      password_error_until_ = 0;
+    CalibPage   calib_page_ = CalibPage::VISION;
+    bool        roi_dragging_ = false;
+    int         roi_drag_edge_ = -1;
+    cv::Point2f roi_last_drag_frame_;
+    cv::Size    displayed_frame_size_;
+    cv::Rect    displayed_frame_rect_;
 
     void build_buttons();
-    void open_password_prompt();
+    void open_password_prompt(bool disable_protection);
     bool check_password() const;
+    bool submit_password(bool force);
+    void complete_password_action();
 
     // ─── Drawing subroutines ──────────────────
     void draw_status_bar(cv::Mat& canvas, const InspectionResult& result);
     void draw_btn_bar(cv::Mat& canvas);
     void draw_btn(cv::Mat& canvas, UIButton& btn);
-    void draw_fps(cv::Mat& canvas);
     void draw_counter_cards(cv::Mat& canvas);
     void draw_result_panel(cv::Mat& canvas, int rpx, int rpy, int rph,
                            const InspectionResult& result);
@@ -99,6 +115,9 @@ public:
 private:
     VisionService vision_;
     TouchHMI      hmi_;
+    InspectionResult last_display_result_;
+    cv::Mat last_display_frame_;
+    double last_hold_render_ = 0;
 
     void on_mouse(int event, int x, int y, int flags);
     static void on_mouse_callback(int event, int x, int y, int flags, void* ud);

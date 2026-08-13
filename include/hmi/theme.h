@@ -8,45 +8,41 @@
 
 struct Theme {
     // ─── Backgrounds ─────────────────────────
-    static inline const cv::Scalar BG{18, 20, 22};
-    static inline const cv::Scalar BG_PANEL{27, 30, 34};
-    static inline const cv::Scalar BG_CARD{38, 42, 48};
+    static inline const cv::Scalar BG{18, 22, 26};
+    static inline const cv::Scalar BG_PANEL{30, 35, 42};
+    static inline const cv::Scalar BG_CARD{45, 52, 62};
 
     // ─── Accents ─────────────────────────────
-    static inline const cv::Scalar CYAN{205, 185, 55};
-    static inline const cv::Scalar GREEN{80, 205, 95};
-    static inline const cv::Scalar RED{70, 72, 225};
-    static inline const cv::Scalar YELLOW{48, 190, 238};
+    static inline const cv::Scalar CYAN{230, 178, 72};
+    static inline const cv::Scalar GREEN{68, 204, 112};
+    static inline const cv::Scalar RED{70, 82, 224};
+    static inline const cv::Scalar YELLOW{45, 194, 230};
     static inline const cv::Scalar ORANGE{45, 132, 230};
 
     // ─── Text ────────────────────────────────
-    static inline const cv::Scalar TXT{235, 238, 244};
-    static inline const cv::Scalar TXT2{162, 170, 180};
-    static inline const cv::Scalar TXT_DIM{92, 98, 108};
+    static inline const cv::Scalar TXT{235, 240, 246};
+    static inline const cv::Scalar TXT2{185, 194, 204};
+    static inline const cv::Scalar TXT_DIM{145, 156, 168};
 
     // ─── Buttons ─────────────────────────────
-    static inline const cv::Scalar BTN_CHECK{170, 132, 36};
-    static inline const cv::Scalar BTN_BACK{60, 150, 65};
-    static inline const cv::Scalar BTN_RESET{64, 68, 78};
-    static inline const cv::Scalar BTN_EXIT{58, 52, 185};
-    static inline const cv::Scalar BTN_THRESH{166, 112, 54};
-    static inline const cv::Scalar BTN_PARAM{57, 62, 72};
-    static inline const cv::Scalar BTN_PARAM_S{190, 148, 42};
-    static inline const cv::Scalar BTN_PLUS{48, 158, 58};
-    static inline const cv::Scalar BTN_MINUS{38, 102, 198};
+    static inline const cv::Scalar BTN_CHECK{230, 178, 72};
+    static inline const cv::Scalar BTN_BACK{205, 132, 70};
+    static inline const cv::Scalar BTN_RESET{45, 52, 62};
+    static inline const cv::Scalar BTN_EXIT{70, 82, 224};
+    static inline const cv::Scalar BTN_THRESH{230, 178, 72};
+    static inline const cv::Scalar BTN_PARAM{45, 52, 62};
+    static inline const cv::Scalar BTN_PARAM_S{230, 178, 72};
+    static inline const cv::Scalar BTN_PLUS{68, 204, 112};
+    static inline const cv::Scalar BTN_MINUS{70, 82, 224};
 
     // ─── Status panels ───────────────────────
     static inline const cv::Scalar STATUS_OK{25, 66, 30};
     static inline const cv::Scalar STATUS_NG{42, 30, 84};
     static inline const cv::Scalar STATUS_WAIT{38, 58, 68};
 
-    // ─── Light button ────────────────────────
-    static inline const cv::Scalar BTN_LIGHT_ON{25, 160, 42};
-    static inline const cv::Scalar BTN_LIGHT_OFF{48, 44, 58};
-
     // ─── Dividers ────────────────────────────
-    static inline const cv::Scalar DIVIDER{54, 59, 68};
-    static inline const cv::Scalar DIVIDER_GLOW{77, 84, 96};
+    static inline const cv::Scalar DIVIDER{68, 76, 88};
+    static inline const cv::Scalar DIVIDER_GLOW{76, 84, 94};
 
     // ─── Color helpers ────────────────────────
     static cv::Scalar darken(cv::Scalar c, double f = 0.55) {

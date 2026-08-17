@@ -1,16 +1,12 @@
 {
     "_comment": "jetson-inspect-v2 — Runtime Application Configuration",
-    "_note": "Camera focus controls below are read at startup. Other values mirror include/core/config.h; tuned detection params are stored in .counter_state.json.",
+    "_note": "Camera quality settings stay on the Hikrobot device; the app captures native frames through MVS without overriding resolution, FPS, pixel format, exposure or gain.",
     "uart": {
         "device": "/dev/ttyTHS1",
         "baud_rate": 115200,
         "_comment": "Jetson TX=pin8 → ESP32 GPIO16(RX) | Jetson RX=pin10 ← ESP32 GPIO17(TX)"
     },
     "camera": {
-        "frame_width": 1920,
-        "frame_height": 1080,
-        "focus_automatic_continuous": true,
-        "focus_absolute": 5,
         "capture_flush_count": 0,
         "capture_settle_ms": 0,
         "capture_timeout_s": 2.0,
@@ -32,7 +28,7 @@
     },
     "timing": {
         "main_loop_timeout_s": 15.0,
-        "waiting_render_interval_s": 0.2
+        "waiting_render_interval_s": 0.0333
     },
     "display": {
         "status_bar_height": 60,

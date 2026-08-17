@@ -115,15 +115,8 @@ private:
     VisionService vision_;
     TouchHMI      hmi_;
     InspectionResult last_display_result_;
-    InspectionResult last_calibration_result_;
     cv::Mat last_display_frame_;
-    cv::Mat password_background_frame_;
-    bool result_frame_frozen_ = false;
-    bool display_frame_is_roi_ = false;
     double last_hold_render_ = 0;
-    double last_calibration_process_ = 0;
-    double last_calibration_render_ = 0;
-    double last_password_render_ = 0;
 
     void on_mouse(int event, int x, int y, int flags);
     static void on_mouse_callback(int event, int x, int y, int flags, void* ud);

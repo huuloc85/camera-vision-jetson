@@ -89,13 +89,9 @@ static int open_serial(const char* device, int baud) {
 }
 
 GPIOController::GPIOController() {
-    log_msg(LOG_WARNING, "UART GPIO: %s @ %d baud",
-            SerialConfig::UART_DEVICE, SerialConfig::BAUD_RATE);
     last_uart_rx_.store(now_sec());
     serial_fd_.store(open_serial(SerialConfig::UART_DEVICE, SerialConfig::BAUD_RATE));
-    if (serial_fd_.load() >= 0) {
-        log_msg(LOG_WARNING, "UART: Open OK (fd=%d)", serial_fd_.load());
-    } else {
+    if (serial_fd_.load() < 0) {
         log_msg(LOG_ERROR, "UART: Open FAILED! Check: sudo chmod 666 %s",
                 SerialConfig::UART_DEVICE);
     }
@@ -122,14 +118,13 @@ GPIOController::GPIOController() {
                     if (!buf.empty()) {
                         if (buf.find(SerialConfig::MSG_READY) != std::string::npos ||
                             buf == "PONG") {
-                            log_msg(LOG_WARNING, "UART: ESP32 handshake OK");
+                            log_msg(LOG_DEBUG, "UART: ESP32 handshake OK");
                             ready = true;
                         } else if (buf == SerialConfig::MSG_TRIGGER) {
                             double trigger_time = now_sec();
                             std::lock_guard<std::mutex> lock(trigger_mutex_);
                             trigger_queue_.push_back(trigger_time);
-                            last_trigger_enqueue_.store(trigger_time);
-                            log_msg(LOG_WARNING, "UART<< TRIGGER queued during startup");
+                            log_msg(LOG_DEBUG, "UART<< TRIGGER queued during startup");
                         }
                     }
                     buf.clear();
@@ -159,7 +154,6 @@ bool GPIOController::reopen_serial() {
     serial_fd_.store(new_fd);
     if (new_fd >= 0) {
         write_all_nonblocking(new_fd, "PING\n", 200);
-        log_msg(LOG_WARNING, "UART: Reconnected (fd=%d)", new_fd);
         return true;
     }
     log_msg(LOG_ERROR, "UART: Reconnect failed");
@@ -206,14 +200,13 @@ void GPIOController::start_uart_listener() {
         constexpr double PING_INTERVAL_S        = 15.0;
         constexpr double STATUS_INTERVAL_S      = 120.0;
         constexpr double STALE_WARN_S           = 45.0;
-        constexpr double TRIGGER_DEBOUNCE_S     = 0.04;
         constexpr size_t TRIGGER_QUEUE_MAX      = 8;
         std::string buf;
         double last_reopen_try  = 0.0;
         double last_ping        = 0.0;
         double last_status      = 0.0;
-        double last_stale_warn  = 0.0;
         double last_trig_overflow_warn = 0.0;
+        bool stale_reported = false;
 
         while (listening_) {
             double now = now_sec();
@@ -231,10 +224,10 @@ void GPIOController::start_uart_listener() {
             }
 
             double last_rx = last_uart_rx_.load();
-            if (now - last_rx >= STALE_WARN_S && now - last_stale_warn >= STALE_WARN_S) {
+            if (now - last_rx >= STALE_WARN_S && !stale_reported) {
                 log_msg(LOG_WARNING, "UART: no ESP32 msg for %.0fs", now - last_rx);
                 connected_.store(false);
-                last_stale_warn = now;
+                stale_reported = true;
             }
 
             if (serial_fd_.load() < 0) {
@@ -255,31 +248,21 @@ void GPIOController::start_uart_listener() {
                         buf = trim_ascii(buf);
                         last_uart_rx_.store(now_sec());
                         connected_.store(true);
+                        stale_reported = false;
                         if (buf == SerialConfig::MSG_TRIGGER) {
                             double t_now = now_sec();
-                            double last_enq = last_trigger_enqueue_.load();
-                            if (t_now - last_enq >= TRIGGER_DEBOUNCE_S) {
-                                last_trigger_enqueue_.store(t_now);
-                                std::lock_guard<std::mutex> lock(trigger_mutex_);
-                                if (trigger_queue_.size() >= TRIGGER_QUEUE_MAX) {
-                                    trigger_queue_.pop_front();
-                                    if (t_now - last_trig_overflow_warn >= 2.0) {
-                                        log_msg(LOG_WARNING, "Trigger queue overflow");
-                                        last_trig_overflow_warn = t_now;
-                                    }
+                            std::lock_guard<std::mutex> lock(trigger_mutex_);
+                            if (trigger_queue_.size() >= TRIGGER_QUEUE_MAX) {
+                                trigger_queue_.pop_front();
+                                if (t_now - last_trig_overflow_warn >= 2.0) {
+                                    log_msg(LOG_WARNING, "Trigger queue overflow");
+                                    last_trig_overflow_warn = t_now;
                                 }
-                                trigger_queue_.push_back(t_now);
-                                log_msg(LOG_WARNING, "UART<< TRIGGER enqueued (queue=%d)",
-                                        (int)trigger_queue_.size());
-                            } else {
-                                log_msg(LOG_WARNING, "UART<< TRIGGER debounced (%.1fms)",
-                                        (t_now - last_enq) * 1000.0);
                             }
-                        } else if (buf.find(SerialConfig::MSG_READY) != std::string::npos
-                                   || buf.rfind("ESP32 ", 0) == 0 || buf == "PONG") {
-                            log_msg(LOG_WARNING, "UART<< %s", buf.c_str());
-                        } else {
-                            log_msg(LOG_WARNING, "UART<< UNKNOWN [%s]", buf.c_str());
+                            trigger_queue_.push_back(t_now);
+                        } else if (buf.find(SerialConfig::MSG_READY) == std::string::npos
+                                   && buf.rfind("ESP32 ", 0) != 0 && buf != "PONG") {
+                            // Ignore non-protocol chatter in production.
                         }
                         buf.clear();
                     }
@@ -338,9 +321,7 @@ bool GPIOController::signal_result(int pin) {
     else if (pin == SerialConfig::PIN_NG) cmd = SerialConfig::CMD_NG_ON;
     else return false;
     // CRITICAL PATH: direct UART (not queued) for minimal latency
-    log_msg(LOG_WARNING, "UART>> %s (direct)", cmd.c_str());
     if (!send_command(cmd)) {
-        log_msg(LOG_WARNING, "UART>> %s FAILED, retry once", cmd.c_str());
         return send_command(cmd);
     }
     return true;
@@ -349,7 +330,6 @@ bool GPIOController::signal_result(int pin) {
 bool GPIOController::set_busy(bool s) {
     std::string cmd = s ? SerialConfig::CMD_BUSY_ON : SerialConfig::CMD_BUSY_OFF;
     if (!send_command(cmd)) {
-        log_msg(LOG_WARNING, "UART>> %s FAILED", cmd.c_str());
         return false;
     }
     return true;
@@ -358,6 +338,11 @@ bool GPIOController::set_busy(bool s) {
 bool GPIOController::has_pending_trigger() const {
     std::lock_guard<std::mutex> lock(trigger_mutex_);
     return !trigger_queue_.empty();
+}
+
+double GPIOController::pending_trigger_time() const {
+    std::lock_guard<std::mutex> lock(trigger_mutex_);
+    return trigger_queue_.empty() ? 0.0 : trigger_queue_.front();
 }
 
 double GPIOController::consume_trigger() {

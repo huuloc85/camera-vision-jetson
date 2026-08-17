@@ -66,6 +66,8 @@ struct InspectionResult {
     bool          has_metrics = false;
     cv::Mat       roi_vis;        // Visual frame published to the HMI
     cv::Mat       thresh;         // Threshold debug image
+    std::vector<cv::Point> frame_contour; // Contour in roi_vis coordinates
+    bool          roi_view     = false; // Frame/contour already use rotated ROI coordinates
     double        cycle_ms   = 0; // Processing time in ms
 };
 

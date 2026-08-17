@@ -17,7 +17,7 @@ jetson-inspect-v2/
 │   ├── gpio/
 │   │   └── gpio_controller.h  — Interface UART GPIO qua ESP32
 │   ├── vision/
-│   │   ├── camera.h        — LibcameraCapture (Argus/libcamera/V4L2)
+│   │   ├── camera.h        — MvsCamera (Hikrobot GigE only)
 │   │   ├── image_processor.h  — ROI warp, preprocess, metrics
 │   │   ├── classifier.h    — ProductClassifier (OK/NG logic)
 │   │   ├── detection_state.h  — Counters, params, state machine, persistence
@@ -49,7 +49,7 @@ jetson-inspect-v2/
 TouchApp (main loop)
     │
     ├── VisionService        ← Camera, GPIO, pipeline, state machine
-    │     ├── LibcameraCapture
+    │     ├── MvsCamera
     │     ├── ImageProcessor
     │     ├── ProductClassifier
     │     ├── DetectionState
@@ -67,43 +67,78 @@ TouchApp (main loop)
 
 ---
 
-## Build
+## Hikrobot GigE / MVS camera
 
-```bash
-cd jetson-inspect-v2
-mkdir build && cd build
-cmake .. -DCMAKE_BUILD_TYPE=Release
-make -j$(nproc)
-./jetson_inspect_v2
+Camera production lấy ảnh qua Hikrobot MVS SDK 3.0.1 trong `/opt/MVS`:
+
+```text
+MVS GigE → MV_CC_GetImageBuffer → native-size copy/convert → OpenCV
 ```
 
-## Jetson Orin: build CUDA riêng (không ghi đè bản đang chạy)
+MVS là camera backend duy nhất và CMake bắt buộc phải tìm thấy
+`MvCameraControl`. Ứng dụng không ghi `Width`, `Height`, `AcquisitionFrameRate`,
+`PixelFormat`, exposure hoặc gain; chất lượng native đang cấu hình trên camera
+được giữ nguyên. Flow trigger, realtime latest-frame, Vision/ROI, UART và HMI
+của `VisionService` không đổi.
 
-Các script dưới đây phải chạy trên Jetson (`aarch64`), không chạy trên Mac.
-OpenCV CUDA được cài riêng vào `/opt/opencv-cuda`; binary CPU trong `build/` và
-file căn chỉnh `.counter_state.json` không bị thay thế.
+Frame Mono8 được đưa sang BGR chỉ để vẽ overlay màu. Frame RGB/BGR giữ nguyên
+màu; Bayer/YUV được MVS chuyển sang BGR ở đúng kích thước camera, không resize,
+crop, sharpen, blur hay ép grayscale.
+
+HMI cũng có live preview liên tục khi chờ trigger: camera worker giữ acquisition
+native và cập nhật một mailbox chỉ chứa bản preview vừa vùng hiển thị (tối đa
+30 FPS). Bản preview này chỉ phục vụ hiển thị; frame dùng cho trigger/Vision
+vẫn là frame native đầy đủ của MVS.
+
+```bash
+sudo dpkg -i MVS-3.0.1_aarch64_20251113.deb
+export LD_LIBRARY_PATH=/opt/MVS/lib:/opt/MVS/lib/64:/opt/MVS/lib/aarch64:/opt/MVS/bin:$LD_LIBRARY_PATH
+./scripts/preflight_jetson_nano.sh
+./scripts/build_jetson_nano_cpu.sh
+./scripts/run_jetson_inspect_nano_cpu.sh
+```
+
+Khi đúng, build/runtime phải có `Hikrobot MVS: REQUIRED`,
+`MVS GigE devices found: 1`, `Camera started via Hikrobot MVS GigE` và
+`MVS real frame: <width>x<height> pixel=... bytes=... frame=...`.
+
+---
+
+## Jetson Nano B01: MVS + CPU-only
+
+Đây là flow build duy nhất của branch này. Nano dùng OpenCV hệ thống và ép toàn
+bộ Vision/ROI sang CPU. Binary được tạo trong `build-nano-cpu`; flow
+trigger/UART/HMI không thay đổi:
+
+```bash
+./scripts/build_jetson_nano_cpu.sh
+./scripts/run_jetson_inspect_nano_cpu.sh
+```
 
 ```bash
 cd ~/jetson-inspect-v2
-chmod +x scripts/*cuda*.sh
-./scripts/install_opencv_cuda_jetson.sh
-./scripts/build_jetson_cuda.sh
-
-DISPLAY=:0 XAUTHORITY=/home/vvp/.Xauthority \
-./scripts/run_jetson_inspect_cuda.sh
+chmod +x scripts/*.sh
+./scripts/preflight_jetson_nano.sh
 ```
 
-Nếu `nvcc` chưa tồn tại, cài JetPack development trước:
+Nếu preflight không có `FAIL`, chạy build và runner CPU-only ở trên.
+
+Nano lấy camera Hikrobot GigE trực tiếp bằng MVS SDK. Project không
+còn code CSI, USB, Argus, libcamera, V4L2 hoặc GStreamer camera fallback.
+
+Nano tự giới hạn OpenCV CPU ở 2 thread để dành CPU cho camera/HMI/UART. Chỉ
+đổi khi chẩn đoán bằng biến `JETSON_OPENCV_THREADS`; production nên để mặc định.
+
+Khi benchmark Nano, có thể khóa chế độ hiệu năng tối đa (đổi lại máy nóng và
+tiêu thụ điện cao hơn):
 
 ```bash
-sudo apt update
-sudo apt install nvidia-jetpack
+sudo nvpmodel -m 0
+sudo jetson_clocks
 ```
 
-Build CUDA dùng kiến trúc Orin `8.7`, mặc định chỉ build 2 job để tránh hết RAM.
-Có thể đổi bằng `OPENCV_BUILD_JOBS=1` hoặc `2`. Khi khởi động đúng, log phải có
-`Build: CUDA acceleration ENABLED`, `Camera realtime capture worker ON` và
-`OpenCV CUDA` trong output `opencv_version --verbose`.
+Phải dùng nguồn DC 5V/4A qua jack barrel và quạt chủ động trước khi bật chế độ
+này. Các lệnh chỉ đổi clock/power, không đổi flow Vision hoặc UART.
 
 Mỗi trigger publish `HMI freeze: published 1080x804` bằng đúng perspective ROI
 cận sản phẩm giống Calibration mode; frame nền bị bỏ và không đưa lên HMI. Log
@@ -115,29 +150,9 @@ HMI dùng cùng template `IndustrialHmiApp` của `opencv-detect`: canvas 1024x6
 top bar 52 px, bottom touch bar 96 px, panel kết quả phải 190 px và khung camera
 có lề 18 px. Phần giao diện này không thay đổi Vision ROI hay ESP32/UART.
 
-Camera USB lấy cấu hình từ biến môi trường của launcher, tương tự luồng CLI/env
-của `opencv-detect`. Giá trị mặc định production vẫn là `/dev/video0`, MJPG,
-1920x1080 @ 60 FPS và NVIDIA HW-MJPEG; do đó flow trigger/vision/UART không đổi:
-
-```bash
-JETSON_CAM_V4L2_INDEX=0 \
-JETSON_CAM_WIDTH=1920 JETSON_CAM_HEIGHT=1080 JETSON_CAM_FPS=60 \
-JETSON_CAM_FOURCC=MJPG JETSON_CAM_HW_MJPEG=1 \
-./scripts/run_jetson_inspect_cuda.sh
-```
-
-Focus được đọc trực tiếp từ `config/app_config.json` khi camera khởi động:
-
-```json
-"focus_automatic_continuous": true,
-"focus_absolute": 5
-```
-
-Khi autofocus là `true`, chương trình không gửi `focus_absolute`. Khi đổi sang
-`false`, hai control được gửi tuần tự: tắt autofocus trước rồi mới đặt focus,
-tránh lỗi I/O của camera khi gửi chung một lệnh. Nút `Mat Khau: BAT/TAT` trên
-HMI điều khiển bảo vệ phần Căn Chỉnh; nhập đúng chữ số cuối sẽ tự xác nhận,
-không cần nhấn `OK`.
+Mọi thiết lập chất lượng camera được chỉnh và lưu bằng MVS Client. Ứng dụng chỉ
+tắt hardware trigger của camera để giữ continuous acquisition theo flow trigger
+PLC hiện tại; không ghi đè các thông số hình ảnh.
 
 Camera sẽ log mode thực tế sau khi driver negotiate. Để đo riêng tốc độ detect
 giống benchmark của `opencv-detect`, đồng thời kiểm tra latency hiển thị đầy đủ:
@@ -160,30 +175,9 @@ chmod +x scripts/*.sh
 ```
 
 Sau đó double-click icon **CAP-INS7A-SPIKE** trên Desktop. Launcher luôn chạy
-binary CUDA `build-cuda/jetson_inspect_v2`, tự đặt `DISPLAY=:0`, dùng
+binary CPU-only `build-nano-cpu/jetson_inspect_v2`, tự đặt `DISPLAY=:0`, dùng
 `~/.Xauthority`, và không cho mở hai HMI cùng lúc. Log khi mở từ icon nằm tại
 `logs/desktop-launch.log`.
-
-## GitNexus MCP
-
-Project đã được index bằng GitNexus với alias `jetson-inspect-v2`.
-Codex MCP project-local nằm ở `.codex/config.toml`:
-
-```toml
-[mcp_servers.gitnexus]
-command = "npx"
-args = ["-y", "gitnexus@latest", "mcp"]
-```
-
-Sau khi sửa code đáng kể, cập nhật graph:
-
-```bash
-npx -y gitnexus@latest analyze . --skip-git --skip-agents-md --name jetson-inspect-v2
-```
-
-Vì folder này hiện không có `.git`, GitNexus cần `--skip-git` và commit tracking sẽ là `unknown`.
-
----
 
 ## So sánh v1 vs v2
 

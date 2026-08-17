@@ -160,7 +160,7 @@ double DetectionState::cycle_rate() const {
 
 void DetectionState::transition(AppState next) {
     if (app_state == next) return;
-    log_msg(LOG_WARNING, "State: %s -> %s",
+    log_msg(LOG_DEBUG, "State: %s -> %s",
             state_name(app_state), state_name(next));
     app_state = next;
 }

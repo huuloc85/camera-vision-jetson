@@ -6,10 +6,6 @@
 #include "core/logger.h"
 #include "core/time_utils.h"
 
-#if CV_VERSION_MAJOR >= 5
-#include <opencv2/geometry/2d.hpp>
-#endif
-
 #include <chrono>
 #include <thread>
 #include <algorithm>
@@ -24,8 +20,6 @@ using core::now_sec;
 using core::sleep_sec;
 
 namespace {
-constexpr double CAMERA_START_RETRY_S = 3.0;
-
 bool frame_has_signal(const cv::Mat& frame, double* mean_out = nullptr,
                       double* max_out = nullptr) {
     if (frame.empty()) return false;
@@ -57,7 +51,7 @@ bool frame_has_signal(const cv::Mat& frame, double* mean_out = nullptr,
     }
 }
 
-bool prime_camera_frames(MvsCamera& camera, int max_attempts = 12,
+bool prime_camera_frames(LibcameraCapture& camera, int max_attempts = 12,
                          int required_consecutive = 2) {
     int consecutive = 0;
     for (int attempt = 0; attempt < max_attempts; ++attempt) {
@@ -83,22 +77,21 @@ VisionService::VisionService()
 {
     const int opencv_threads = core::recommended_opencv_threads();
     cv::setNumThreads(opencv_threads);
-    log_msg(LOG_DEBUG, "OpenCV CPU threads: %d%s", opencv_threads,
+    log_msg(LOG_WARNING, "OpenCV CPU threads: %d%s", opencv_threads,
             core::is_jetson_nano() ? " (Jetson Nano profile)" : "");
 
     state.transition(AppState::INITIALIZING);
 
     if (!camera_.start()) {
         log_msg(LOG_CRITICAL, "Camera init failed!");
-        camera_start_failed_ = true;
         state.transition(AppState::ALARM);
     } else {
         sleep_sec(1.0);
         if (prime_camera_frames(camera_))
-            log_msg(LOG_DEBUG, "Camera primed: 2 consecutive valid frames");
+            log_msg(LOG_WARNING, "Camera primed: 2 consecutive valid frames");
         else
             log_msg(LOG_WARNING, "Camera prime incomplete; trigger capture will retry");
-        log_msg(LOG_DEBUG,
+        log_msg(LOG_WARNING,
                 "Camera trigger mode: realtime capture, publish-on-trigger");
         state.transition(gpio.is_connected() ? AppState::IDLE : AppState::DISCONNECTED);
     }
@@ -171,9 +164,6 @@ bool VisionService::set_roi_rectangle_from_frame(const cv::Point2f& first,
 }
 
 void VisionService::save_roi_settings() {
-    // Invalidate the cached transforms so the next PLC trigger rebuilds them
-    // from exactly the ROI being persisted here.
-    processor_.refresh_roi();
     state.save_state();
     log_msg(LOG_WARNING, "ROI saved: P1=(%.0f,%.0f) P2=(%.0f,%.0f) "
                          "P3=(%.0f,%.0f) P4=(%.0f,%.0f)",
@@ -198,24 +188,6 @@ bool VisionService::should_render_waiting_frame(double now) {
     return true;
 }
 
-cv::Mat VisionService::latest_preview_frame() {
-    std::lock_guard<std::mutex> lock(preview_frame_mutex_);
-    return preview_frame_;
-}
-
-cv::Mat VisionService::latest_preview_roi_frame() {
-    cv::Mat frame = latest_preview_frame();
-    if (frame.empty())
-        return {};
-
-    // The 540x402 ROI is already close to the physical HMI video height, so
-    // it can be shown live without warping the full native MVS frame at 30 Hz.
-    cv::Mat roi = processor_.warp_roi_fast(frame);
-    if (roi.empty())
-        roi = processor_.warp_roi(frame); // CUDA path fallback
-    return roi;
-}
-
 void VisionService::request_auto_restart() {
     auto_restart();
 }
@@ -233,15 +205,12 @@ cv::Mat VisionService::request_realtime_frame(double not_before) {
         // UART enqueued this trigger while the main thread was drawing HMI.
         if (realtime_frame_ready_ && realtime_frame_time_ >= not_before) {
             const double frame_time = realtime_frame_time_;
-            const std::uint32_t frame_number = realtime_frame_number_;
             cv::Mat frame = realtime_frame_;
             realtime_frame_.release();
             realtime_frame_ready_ = false;
             realtime_frame_time_ = 0.0;
-            realtime_frame_number_ = 0;
             log_msg(LOG_WARNING,
-                    "Camera trigger frame: prefetched frame=%u after=%.1fms age=%.1fms",
-                    frame_number,
+                    "Camera trigger frame: prefetched after=%.1fms age=%.1fms",
                     (frame_time - not_before) * 1000.0,
                     (now_sec() - frame_time) * 1000.0);
             return frame;
@@ -249,7 +218,6 @@ cv::Mat VisionService::request_realtime_frame(double not_before) {
         realtime_frame_ready_ = false;
         realtime_frame_.release();
         realtime_frame_time_ = 0.0;
-        realtime_frame_number_ = 0;
         realtime_capture_request_time_ = not_before > 0.0 ? not_before : now_sec();
         realtime_capture_request_ = true;
     }
@@ -265,15 +233,12 @@ cv::Mat VisionService::request_realtime_frame(double not_before) {
         return cv::Mat();
     }
     const double frame_time = realtime_frame_time_;
-    const std::uint32_t frame_number = realtime_frame_number_;
     cv::Mat frame = realtime_frame_;
     realtime_frame_.release();
     realtime_frame_ready_ = false;
     realtime_frame_time_ = 0.0;
-    realtime_frame_number_ = 0;
     log_msg(LOG_WARNING,
-            "Camera trigger frame: waited frame=%u after=%.1fms",
-            frame_number,
+            "Camera trigger frame: waited after=%.1fms",
             (frame_time - not_before) * 1000.0);
     return frame;
 }
@@ -296,8 +261,9 @@ cv::Mat VisionService::safe_capture(bool flush, bool require_signal,
         return cv::Mat();
     }
 
-    // The realtime worker continuously receives MVS frames. A trigger waits
-    // for the first completed native frame at or after its timestamp.
+    // The realtime worker drains V4L2 with grab() continuously. A trigger
+    // waits only for the next retrieve(), instead of flushing old frames in
+    // the critical path.
     if (flush && realtime_capture_enabled_) {
         for (int attempt = 1; attempt <= MAX_RETRIES; ++attempt) {
             cv::Mat frame = request_realtime_frame(not_before);
@@ -305,11 +271,11 @@ cv::Mat VisionService::safe_capture(bool flush, bool require_signal,
                 double mean = 0.0, max_value = 0.0;
                 if (!require_signal || frame_has_signal(frame, &mean, &max_value))
                     return frame;
-                log_msg(LOG_DEBUG,
+                log_msg(LOG_WARNING,
                         "Camera realtime frame rejected (%d/%d mean=%.2f max=%.0f)",
                         attempt, MAX_RETRIES, mean, max_value);
             } else {
-                log_msg(LOG_DEBUG, "Camera realtime frame timeout (%d/%d)",
+                log_msg(LOG_WARNING, "Camera realtime frame timeout (%d/%d)",
                         attempt, MAX_RETRIES);
             }
             sleep_sec(0.01);
@@ -341,7 +307,7 @@ cv::Mat VisionService::safe_capture(bool flush, bool require_signal,
         if (flush && DetectionConfig::CAPTURE_FLUSH_COUNT > 0) {
             int discarded = camera_.discard_frames(DetectionConfig::CAPTURE_FLUSH_COUNT);
             if (discarded < DetectionConfig::CAPTURE_FLUSH_COUNT) {
-                log_msg(LOG_DEBUG, "Camera buffer flush incomplete (%d/%d)",
+                log_msg(LOG_WARNING, "Camera buffer flush incomplete (%d/%d)",
                         discarded, DetectionConfig::CAPTURE_FLUSH_COUNT);
             }
             if (DetectionConfig::CAPTURE_SETTLE_MS > 0)
@@ -355,11 +321,11 @@ cv::Mat VisionService::safe_capture(bool flush, bool require_signal,
             if (!require_signal || frame_has_signal(frame, &mean, &max_value)) {
                 return frame;
             }
-            log_msg(LOG_DEBUG,
+            log_msg(LOG_WARNING,
                     "Camera black frame rejected (%d/%d mean=%.2f max=%.0f)",
                     attempt, MAX_RETRIES, mean, max_value);
         } else {
-            log_msg(LOG_DEBUG, "Camera capture failed (%d/%d)", attempt, MAX_RETRIES);
+            log_msg(LOG_WARNING, "Camera capture failed (%d/%d)", attempt, MAX_RETRIES);
         }
         lock.unlock();
         sleep_sec(0.1);
@@ -380,7 +346,7 @@ cv::Mat VisionService::safe_capture(bool flush, bool require_signal,
                 (!require_signal || frame_has_signal(frame))) {
                 return frame;
             }
-            log_msg(LOG_DEBUG, "Camera recovery frame invalid (%d/%d)",
+            log_msg(LOG_WARNING, "Camera recovery frame invalid (%d/%d)",
                     attempt, MAX_RETRIES);
             sleep_sec(0.1);
         }
@@ -500,35 +466,19 @@ void VisionService::start_watchdog() {
 void VisionService::start_camera_keepalive() {
     camera_keepalive_thread_ = std::thread([this]() {
         int consecutive_failures = 0;
-        double next_start_retry = 0.0;
         realtime_capture_enabled_ = true;
-        log_msg(LOG_DEBUG, "Camera realtime capture worker ON");
+        log_msg(LOG_WARNING, "Camera realtime capture worker ON");
         while (running_) {
             bool recover_now = false;
             try {
-                if (camera_recovering_ || camera_sleeping_) {
+                if (state.calibration_mode) {
+                    last_trigger_activity_ = now_sec();
+                    consecutive_failures = 0;
                     sleep_sec(0.01);
                     continue;
                 }
-                if (camera_start_failed_) {
-                    const double now = now_sec();
-                    if (now < next_start_retry) {
-                        sleep_sec(0.25);
-                        continue;
-                    }
-
-                    log_msg(LOG_WARNING,
-                            "Camera unavailable at startup; retrying MVS open");
-                    if (restart_camera()) {
-                        camera_start_failed_ = false;
-                        consecutive_failures = 0;
-                        state.transition(gpio.is_connected()
-                            ? AppState::IDLE : AppState::DISCONNECTED);
-                        log_msg(LOG_WARNING,
-                                "Camera startup recovery complete");
-                    } else {
-                        next_start_retry = now_sec() + CAMERA_START_RETRY_S;
-                    }
+                if (camera_recovering_ || camera_sleeping_) {
+                    sleep_sec(0.01);
                     continue;
                 }
                 if (DetectionConfig::CAMERA_SLEEP_TIMEOUT > 0.0 &&
@@ -538,13 +488,9 @@ void VisionService::start_camera_keepalive() {
                     continue;
                 }
 
-                // If a trigger arrives while GetImageBuffer() is waiting, that
-                // completed image may have started exposure before the trigger.
-                // Only publish a frame whose acquisition call started after the
-                // trigger timestamp; the current candidate is otherwise drained.
-                const double capture_started = now_sec();
-                std::uint32_t frame_number = 0;
-                cv::Mat frame = camera_.capture(&frame_number);
+                // Use the backend's atomic grab+retrieve operation. Splitting
+                // these calls is unreliable with a single V4L2 buffer.
+                cv::Mat frame = camera_.capture();
                 const double frame_done = now_sec();
                 if (frame.empty()) {
                     ++consecutive_failures;
@@ -557,44 +503,29 @@ void VisionService::start_camera_keepalive() {
                 } else {
                     consecutive_failures = 0;
                     const double pending_trigger = gpio.pending_trigger_time();
-                    const bool requested_frame = realtime_capture_request_.load();
-                    const double requested_time =
-                        requested_frame ? realtime_capture_request_time_.load() : 0.0;
-                    double target_time = 0.0;
-                    if (pending_trigger > 0.0 && requested_time > 0.0)
-                        target_time = std::min(pending_trigger, requested_time);
-                    else
-                        target_time = std::max(pending_trigger, requested_time);
-                    const bool publish_this_frame =
-                        target_time > 0.0 && capture_started >= target_time;
+                    const bool trigger_frame =
+                        pending_trigger > 0.0 && frame_done >= pending_trigger;
+                    const bool requested_frame =
+                        realtime_capture_request_.exchange(false);
+                    const bool publish_this_frame = trigger_frame || requested_frame;
                     if (publish_this_frame) {
-                        if (requested_frame)
-                            realtime_capture_request_ = false;
+                        if (!trigger_frame &&
+                            realtime_capture_request_time_.load() > frame_done) {
+                            realtime_capture_request_ = true;
+                            continue;
+                        }
                         {
                             std::lock_guard<std::mutex> lock(realtime_frame_mutex_);
                             // Preserve only the first completed frame after
                             // the trigger. Do not replace it while the main
                             // thread is still composing the previous HMI.
                             if (!realtime_frame_ready_) {
-                                // capture() already returned an owning copy of
-                                // the MVS SDK buffer. Sharing its immutable Mat
-                                // avoids another native-size memory copy.
-                                realtime_frame_ = frame;
+                                realtime_frame_ = frame.clone();
                                 realtime_frame_time_ = frame_done;
-                                realtime_frame_number_ = frame_number;
                                 realtime_frame_ready_ = true;
                             }
                         }
                         realtime_frame_cv_.notify_all();
-                    }
-
-                    // Keep only the newest native MVS frame for HMI preview.
-                    // cv::Mat shares this immutable owning buffer; there is no
-                    // native-size copy, resize, or queue here. TouchHMI scales
-                    // it once at final presentation using INTER_AREA.
-                    {
-                        std::lock_guard<std::mutex> lock(preview_frame_mutex_);
-                        preview_frame_ = frame;
                     }
                 }
             } catch (const cv::Exception& e) {
@@ -611,7 +542,7 @@ void VisionService::start_camera_keepalive() {
                 recover_now = true;
             }
 
-            if (recover_now && running_ && !camera_start_failed_) {
+            if (recover_now && running_) {
                 log_msg(LOG_WARNING,
                         "Camera worker recovery after %d consecutive failures",
                         consecutive_failures);
@@ -632,33 +563,34 @@ void VisionService::start_camera_keepalive() {
 VisionService::FullProcessResult
 VisionService::process_frame_internal(const cv::Mat& frame, bool fast) {
     FullProcessResult res;
+    cv::Mat roi = processor_.warp_roi(frame);
     // Keep calibration preview on the original camera frame. ROI is only the
     // processing space; it must not change the HMI camera framing.
-    res.roi_vis = frame;
+    res.roi_vis = frame.clone();
 
     cv::Mat det_roi;
     double scale;
-    if (fast) {
-        // Calibration only needs the fast detection ROI. Avoid computing the
-        // full 1080x804 warp as a discarded intermediate on every UI frame.
-        det_roi = processor_.warp_roi_fast(frame);
-        scale = 2.0;
-    } else {
-        det_roi = processor_.warp_roi(frame);
-        scale = 1.0;
-    }
+    if (fast) { det_roi = processor_.warp_roi_fast(frame); scale = 2.0; }
+    else       { det_roi = roi;                             scale = 1.0; }
 
     auto [gray, thresh] = processor_.preprocess(det_roi);
     res.thresh = thresh;
 
-    std::vector<cv::Point> lc;
-    cv::Mat product_mask;
-    if (!ImageProcessor::select_product_contour(thresh, lc, product_mask)) {
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+    if (contours.empty()) {
         res.has_metrics = false;
         res.result      = ProductResult::WAIT;
         res.info_text   = "No contour";
         return res;
     }
+
+    int max_idx = 0; double max_area = 0;
+    for (int i = 0; i < (int)contours.size(); i++) {
+        double a = cv::contourArea(contours[i]);
+        if (a > max_area) { max_area = a; max_idx = i; }
+    }
+    auto& lc = contours[max_idx];
 
     std::vector<cv::Point> lc_full;
     if (fast && scale != 1.0) {
@@ -671,8 +603,7 @@ VisionService::process_frame_internal(const cv::Mat& frame, bool fast) {
     if (fast && scale != 1.0) {
         auto brh = cv::boundingRect(lc);
         res.metrics = ImageProcessor::calculate_metrics(lc, brh.x, brh.y,
-                                                        brh.width, brh.height,
-                                                        product_mask);
+                                                        brh.width, brh.height, thresh);
         res.metrics.width       = br.width;
         res.metrics.height      = br.height;
         res.metrics.area        = cv::contourArea(lc_full);
@@ -681,8 +612,7 @@ VisionService::process_frame_internal(const cv::Mat& frame, bool fast) {
         res.metrics.top_width   = (int)(res.metrics.top_width   * scale);
     } else {
         res.metrics = ImageProcessor::calculate_metrics(lc_full, br.x, br.y,
-                                                        br.width, br.height,
-                                                        product_mask);
+                                                        br.width, br.height, thresh);
     }
     res.has_metrics = true;
 
@@ -693,7 +623,10 @@ VisionService::process_frame_internal(const cv::Mat& frame, bool fast) {
     if (result != ProductResult::WAIT) {
         const auto frame_contour =
             processor_.map_roi_contour_to_frame(lc_full, frame.size());
-        res.frame_contour = frame_contour;
+        if (!frame_contour.empty()) {
+            std::vector<std::vector<cv::Point>> ctrs = {frame_contour};
+            cv::drawContours(res.roi_vis, ctrs, -1, cv::Scalar(0, 255, 0), 2);
+        }
     }
     return res;
 }
@@ -704,25 +637,35 @@ VisionService::detect_only(const cv::Mat& frame) {
     res.det_roi      = processor_.warp_roi_fast(frame);
     auto [gray, thresh] = processor_.preprocess(res.det_roi);
 
-    std::vector<cv::Point> lc;
-    cv::Mat product_mask;
-    if (!ImageProcessor::select_product_contour(thresh, lc, product_mask)) {
+    std::vector<std::vector<cv::Point>> contours;
+    cv::findContours(thresh, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_NONE);
+    if (contours.empty()) {
         res.result      = ProductResult::WAIT;
         res.info_text   = "No contour";
         res.has_metrics = false;
         return res;
     }
+
+    int max_idx = 0; double max_area = 0;
+    for (int i = 0; i < (int)contours.size(); i++) {
+        double a = cv::contourArea(contours[i]);
+        if (a > max_area) { max_area = a; max_idx = i; }
+    }
+    auto& lc  = contours[max_idx];
     auto brh  = cv::boundingRect(lc);
     res.metrics = ImageProcessor::calculate_metrics(lc, brh.x, brh.y,
-                                                    brh.width, brh.height,
-                                                    product_mask);
-    // Keep the contour in the same 540x402 coordinates as det_roi. PLC mode
-    // can freeze this already-produced image directly instead of warping the
-    // native frame a second time just for HMI presentation.
-    res.contour = std::move(lc);
+                                                    brh.width, brh.height, thresh);
+    // Use the exact inverse transform that produced the 540x402 detection
+    // image. This avoids a rounded x2 contour before drawing on the camera.
+    res.frame_contour = processor_.map_roi_contour_to_frame(
+        lc, frame.size(), cv::Size(540, 402));
+    // Scale ×2 to full-res
+    res.contour.resize(lc.size());
+    for (size_t i = 0; i < lc.size(); i++)
+        res.contour[i] = cv::Point(lc[i].x * 2, lc[i].y * 2);
     res.metrics.width       = brh.width  * 2;
     res.metrics.height      = brh.height * 2;
-    res.metrics.area       *= 4.0;
+    res.metrics.area        = cv::contourArea(res.contour);
     res.metrics.spike_min_w *= 2;
     res.metrics.spike_max_w *= 2;
     res.metrics.top_width   *= 2;
@@ -731,13 +674,6 @@ VisionService::detect_only(const cv::Mat& frame) {
     auto [result, info] = classifier_.classify(res.contour, res.metrics);
     res.result    = result;
     res.info_text = info;
-    // The CPU path publishes det_roi, so it does not need an inverse
-    // perspective transform for every contour. Keep the mapping only for the
-    // CUDA fallback where warp_roi_fast() intentionally returns no CPU Mat.
-    if (res.det_roi.empty()) {
-        res.frame_contour = processor_.map_roi_contour_to_frame(
-            res.contour, frame.size(), cv::Size(540, 402));
-    }
     return res;
 }
 
@@ -747,7 +683,7 @@ VisionService::detect_only(const cv::Mat& frame) {
 InspectionResult VisionService::process_trigger(double trigger_time) {
     InspectionResult out;
     double t_start = now_sec();
-    log_msg(LOG_DEBUG, ">>> TRIGGER (delay=%.0fms)",
+    log_msg(LOG_WARNING, ">>> TRIGGER (delay=%.0fms)",
             trigger_time > 0 ? (t_start - trigger_time) * 1000.0 : 0.0);
 
     watchdog_heartbeat_.store(t_start);
@@ -768,7 +704,7 @@ InspectionResult VisionService::process_trigger(double trigger_time) {
     double result_gpio_ms = 0.0;
     double result_sent_at = 0.0;
     auto send_result = [&](int pin) {
-        const double gpio_t0 = now_sec();
+        double gpio_t0 = now_sec();
         bool delivered = gpio.signal_result(pin);
         result_sent_at = now_sec();
         result_gpio_ms = (result_sent_at - gpio_t0) * 1000.0;
@@ -800,11 +736,24 @@ InspectionResult VisionService::process_trigger(double trigger_time) {
     }
 
     try {
-        const double cap_t0 = now_sec();
+        double debounce_s = DetectionConfig::TRIGGER_DEBOUNCE_MS / 1000.0;
+        if (event_time - last_trigger_time_ < debounce_s) {
+            log_msg(LOG_WARNING, "Trigger: debounce -> OK");
+            if (!send_result(SerialConfig::PIN_OK)) return out;
+            last_trigger_time_ = event_time;
+            state.transition(AppState::RESULT_SHOWN);
+            out.label = "OK"; out.result = ProductResult::OK;
+            out.info_text = "Trigger debounced";
+            remember_result();
+            return out;
+        }
+
+        double cap_t0 = now_sec();
         cv::Mat frame = safe_capture(true, true, event_time);
         if (frame.empty()) {
             log_msg(LOG_ERROR, "Trigger: camera failed -> OK");
             if (!send_result(SerialConfig::PIN_OK)) return out;
+            last_trigger_time_ = event_time;
             state.transition(AppState::IDLE);
             out.label = "OK"; out.result = ProductResult::OK;
             out.info_text = "Camera capture failed";
@@ -812,59 +761,39 @@ InspectionResult VisionService::process_trigger(double trigger_time) {
             return out;
         }
 
-        const double capture_done = now_sec();
+        double capture_done = now_sec();
         auto det = detect_only(frame);
-        const double detect_done = now_sec();
+        double detect_done = now_sec();
 
         out.metrics     = det.metrics;
         out.has_metrics = det.has_metrics;
         out.info_text   = det.info_text;
-        out.frame_contour = det.frame_contour;
         double hmi_frame_ms = 0.0;
         auto build_hmi_frame = [&]() {
-            const double hmi_t0 = now_sec();
+            // Publish the original camera frame. Detection remains on the
+            // fast half-resolution ROI; only its contour is mapped for HMI.
+            double hmi_t0 = now_sec();
             try {
-                // The CPU detector already produced the calibrated 540x402
-                // ROI, which is approximately the final HMI display size.
-                // Reuse it so each trigger performs only one ROI warp.
-                if (!det.det_roi.empty()) {
-                    out.roi_vis = det.det_roi;
-                    out.frame_contour = det.contour;
-                    out.roi_view = true;
-                    last_result_frame_ = det.det_roi;
-                } else {
-                    // CUDA detection keeps its ROI on the device. Preserve
-                    // the previous full-resolution presentation fallback.
-                    cv::Mat roi_frame = processor_.warp_roi(frame);
-                    if (!roi_frame.empty()) {
-                        out.roi_vis = roi_frame;
-                        out.frame_contour.resize(det.contour.size());
-                        for (size_t i = 0; i < det.contour.size(); ++i) {
-                            out.frame_contour[i] = cv::Point(
-                                det.contour[i].x * 2, det.contour[i].y * 2);
-                        }
-                        out.roi_view = true;
-                        last_result_frame_ = roi_frame;
-                    } else {
-                        out.roi_vis = frame;
-                        out.frame_contour = det.frame_contour;
-                        out.roi_view = false;
-                        last_result_frame_ = frame;
-                    }
+                cv::Mat frame_vis = frame.clone();
+                if (!det.contour.empty()) {
+                    std::vector<std::vector<cv::Point>> ctrs = {det.frame_contour};
+                    cv::Scalar contour_color = det.result == ProductResult::NG
+                        ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 255, 0);
+                    if (!det.frame_contour.empty())
+                        cv::drawContours(frame_vis, ctrs, -1, contour_color, 3);
                 }
+                out.roi_vis = frame_vis;
+                last_result_frame_ = frame_vis;
             } catch (...) {
-                // Keep a usable result view if the ROI warp fails.
                 out.roi_vis = frame;
-                out.frame_contour = det.frame_contour;
-                out.roi_view = false;
                 last_result_frame_ = frame;
             }
             hmi_frame_ms = (now_sec() - hmi_t0) * 1000.0;
         };
         auto finish_timing = [&]() {
-            const double duration = now_sec() - t_start;
-            const double critical_end = result_sent_at > 0.0
-                ? result_sent_at : detect_done;
+            double done = now_sec();
+            double duration = done - t_start;
+            double critical_end = result_sent_at > 0.0 ? result_sent_at : detect_done;
             out.cycle_ms = duration * 1000.0;
             capture_ms_.store(out.cycle_ms);
             capture_fps_.store(duration > 0.0 ? 1.0 / duration : 0.0);
@@ -880,10 +809,11 @@ InspectionResult VisionService::process_trigger(double trigger_time) {
         };
 
         if (det.result == ProductResult::WAIT) {
-            log_msg(LOG_DEBUG, "Trigger result: WAIT -> OK");
+            log_msg(LOG_WARNING, "Trigger result: WAIT -> OK");
             if (!send_result(SerialConfig::PIN_OK)) return out;
             build_hmi_frame();
             finish_timing();
+            last_trigger_time_ = event_time;
             state.transition(AppState::RESULT_SHOWN);
             out.label = "OK"; out.result = ProductResult::OK;
             remember_result();
@@ -906,6 +836,7 @@ InspectionResult VisionService::process_trigger(double trigger_time) {
 
         state.last_label     = out.label;
         state.last_info_text = out.info_text;
+        last_trigger_time_   = event_time;
 
         build_hmi_frame();
         finish_timing();
@@ -915,6 +846,7 @@ InspectionResult VisionService::process_trigger(double trigger_time) {
     } catch (std::exception& e) {
         log_msg(LOG_ERROR, "Trigger error: %s -> OK", e.what());
         if (!send_result(SerialConfig::PIN_OK)) return out;
+        last_trigger_time_ = event_time;
         state.transition(AppState::ALARM);
         out.label = "OK"; out.result = ProductResult::OK;
         out.info_text = e.what();
@@ -927,9 +859,7 @@ InspectionResult VisionService::process_frame_for_calibration() {
     watchdog_heartbeat_.store(now_sec());
     InspectionResult out;
 
-    // The MVS worker remains the sole acquisition owner in calibration mode.
-    // Request its next native frame instead of competing for the camera mutex.
-    cv::Mat frame = latest_preview_frame();
+    cv::Mat frame = safe_capture(false, false);
     if (frame.empty()) {
         out.result = ProductResult::WAIT;
         out.label  = "WAIT";
@@ -937,7 +867,7 @@ InspectionResult VisionService::process_frame_for_calibration() {
     }
 
     double cap_t0 = now_sec();
-    auto res = process_frame_internal(frame, true);
+    auto res = process_frame_internal(frame);
     double cap_dur = now_sec() - cap_t0;
     capture_ms_.store(cap_dur * 1000.0);
     capture_fps_.store(cap_dur > 0 ? 1.0 / cap_dur : 0);
@@ -954,7 +884,6 @@ InspectionResult VisionService::process_frame_for_calibration() {
                         ? [&]{ cv::Mat t; cv::cvtColor(res.thresh, t, cv::COLOR_GRAY2BGR); return t; }()
                         : res.roi_vis;
     out.thresh      = res.thresh;
-    out.frame_contour = res.frame_contour;
     out.cycle_ms    = cap_dur * 1000.0;
 
     switch (calib_result) {
@@ -972,7 +901,7 @@ InspectionResult VisionService::process_frame_for_roi_calibration() {
     watchdog_heartbeat_.store(now_sec());
     InspectionResult out;
     double t0 = now_sec();
-    cv::Mat frame = latest_preview_frame();
+    cv::Mat frame = safe_capture(false, false);
     double duration = now_sec() - t0;
     if (frame.empty()) {
         out.result = ProductResult::WAIT;
@@ -982,11 +911,21 @@ InspectionResult VisionService::process_frame_for_roi_calibration() {
 
     capture_ms_.store(duration * 1000.0);
     capture_fps_.store(duration > 0 ? 1.0 / duration : 0.0);
+    auto points = processor_.roi_points_for_frame(frame.size());
+    cv::Mat preview = frame.clone();
+    for (int i = 0; i < 4; ++i) {
+        const cv::Point p1(cvRound(points[i].x), cvRound(points[i].y));
+        const cv::Point p2(cvRound(points[(i + 1) % 4].x),
+                           cvRound(points[(i + 1) % 4].y));
+        cv::line(preview, p1, p2,
+                 cv::Scalar(0, 230, 255), 7, cv::LINE_AA);
+    }
+
     out.result = ProductResult::WAIT;
     out.label = "ROI";
     out.info_text = "Drag to draw a rectangular ROI";
-    out.roi_vis = frame;
+    out.roi_vis = preview;
     out.cycle_ms = duration * 1000.0;
-    last_result_frame_ = frame;
+    last_result_frame_ = preview;
     return out;
 }

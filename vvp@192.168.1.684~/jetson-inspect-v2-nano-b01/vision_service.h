@@ -14,7 +14,6 @@
 #include "gpio/gpio_controller.h"
 
 #include <atomic>
-#include <cstdint>
 #include <condition_variable>
 #include <mutex>
 #include <thread>
@@ -51,8 +50,6 @@ public:
     void heartbeat();
     bool should_render_waiting_frame(double now);
     const cv::Mat& last_result_frame() const { return last_result_frame_; }
-    cv::Mat latest_preview_frame();
-    cv::Mat latest_preview_roi_frame();
     void request_auto_restart();
 
     // ─── State & params (HMI writes, vision reads) ────
@@ -64,19 +61,19 @@ public:
     std::atomic<bool>   running_{true};
 
 protected:
-    MvsCamera        camera_;
+    LibcameraCapture camera_;
     ImageProcessor   processor_;
     ProductClassifier classifier_;
 
     std::timed_mutex cam_lock_;
     cv::Mat last_result_frame_;
     double  last_render_time_    = 0;
+    double  last_trigger_time_   = 0;
     std::atomic<double> last_trigger_activity_{0};
 
     std::atomic<double> watchdog_heartbeat_;
     std::atomic<bool>   camera_recovering_{false};
     std::atomic<bool>   camera_sleeping_{false};
-    std::atomic<bool>   camera_start_failed_{false};
     std::atomic<bool>   realtime_capture_enabled_{false};
     std::atomic<bool>   realtime_capture_request_{false};
     std::atomic<double> realtime_capture_request_time_{0.0};
@@ -85,9 +82,6 @@ protected:
     cv::Mat             realtime_frame_;
     bool                realtime_frame_ready_ = false;
     double              realtime_frame_time_ = 0.0;
-    std::uint32_t       realtime_frame_number_ = 0;
-    std::mutex          preview_frame_mutex_;
-    cv::Mat             preview_frame_;
     std::atomic<bool>   cleanup_done_{false};
     std::atomic<bool>   restart_in_progress_{false};
     std::thread watchdog_thread_;
@@ -114,7 +108,6 @@ protected:
         ProductResult result;
         std::string   info_text;
         cv::Mat       thresh;
-        std::vector<cv::Point> frame_contour;
     };
     FullProcessResult process_frame_internal(const cv::Mat& frame, bool fast = false);
 

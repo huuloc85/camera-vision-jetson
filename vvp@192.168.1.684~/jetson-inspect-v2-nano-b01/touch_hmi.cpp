@@ -20,9 +20,6 @@ extern volatile sig_atomic_t g_signal_received;
 
 namespace {
 constexpr double EXIT_HOLD_SECONDS = 2.0;
-constexpr double CALIBRATION_DETECT_INTERVAL = 0.20;  // 5 Hz on Nano CPU
-constexpr double CALIBRATION_RENDER_INTERVAL = 1.0 / 15.0;
-constexpr double PASSWORD_RENDER_INTERVAL = 1.0 / 15.0;
 constexpr const char* PASSWORD_LABELS[12] = {
     "1", "2", "3", "4", "5", "6", "7", "8", "9", "DEL", "0", "OK"
 };
@@ -203,7 +200,7 @@ void TouchHMI::draw_counter_cards(cv::Mat& canvas) {
         cv::rectangle(canvas, {rx, card_y}, {rx+3, card_y+card_h}, c.color, -1);
         cv::rectangle(canvas, {rx, card_y}, {rx+c.w, card_y+card_h}, Theme::DIVIDER, 1);
         cv::putText(canvas, c.label, {rx+10, card_y+13},
-                    cv::FONT_HERSHEY_SIMPLEX, 0.34, Theme::TXT_DIM, 1, cv::LINE_AA);
+                    cv::FONT_HERSHEY_SIMPLEX, 0.30, Theme::TXT_DIM, 1, cv::LINE_AA);
         auto vsz = cv::getTextSize(c.value, cv::FONT_HERSHEY_SIMPLEX, 0.55, 2, &bl);
         cv::putText(canvas, c.value, {rx+c.w-vsz.width-8, card_y+card_h-9},
                     cv::FONT_HERSHEY_SIMPLEX, 0.55, c.color, 2, cv::LINE_AA);
@@ -223,7 +220,7 @@ void TouchHMI::draw_status_bar(cv::Mat& canvas, const InspectionResult& result) 
     cv::putText(canvas, "CAP INSPECT", {42, 23},
                 cv::FONT_HERSHEY_SIMPLEX, 0.45, Theme::TXT, 2, cv::LINE_AA);
     cv::putText(canvas, "TOUCH HMI", {42, 41},
-                cv::FONT_HERSHEY_SIMPLEX, 0.34, Theme::TXT_DIM, 1, cv::LINE_AA);
+                cv::FONT_HERSHEY_SIMPLEX, 0.30, Theme::TXT_DIM, 1, cv::LINE_AA);
 
     int bl;
     const int bh2 = BAR_H - 14;
@@ -246,8 +243,11 @@ void TouchHMI::draw_status_bar(cv::Mat& canvas, const InspectionResult& result) 
     cv::Scalar badge_c = cal ? Theme::YELLOW : Theme::CYAN;
     draw_badge(326, 138, "MODE", badge_txt, badge_c);
 
-    cv::putText(canvas, "HIKROBOT GIGE / MVS", {482, 23},
-                cv::FONT_HERSHEY_SIMPLEX, 0.38, Theme::TXT_DIM, 1, cv::LINE_AA);
+    const char* camera_index = std::getenv("JETSON_CAM_V4L2_INDEX");
+    const std::string camera_source = std::string("USB /dev/video") +
+        ((camera_index && *camera_index) ? camera_index : "0");
+    cv::putText(canvas, camera_source, {482, 23},
+                cv::FONT_HERSHEY_SIMPLEX, 0.34, Theme::TXT_DIM, 1, cv::LINE_AA);
     char cycle_buf[32];
     snprintf(cycle_buf, sizeof(cycle_buf), "%.0f ms", result.cycle_ms);
     cv::putText(canvas, cycle_buf, {482, 41}, cv::FONT_HERSHEY_SIMPLEX,
@@ -297,7 +297,7 @@ void TouchHMI::draw_result_panel(cv::Mat& canvas, int rpx, int rpy, int rph,
         cv::putText(canvas, label, {rpx+18, cur_y}, cv::FONT_HERSHEY_SIMPLEX,
                     0.32, Theme::TXT_DIM, 1, cv::LINE_AA);
         int baseline = 0;
-        double value_scale = 0.40;
+        double value_scale = 0.36;
         auto label_size = cv::getTextSize(label, cv::FONT_HERSHEY_SIMPLEX,
                                           0.32, 1, &baseline);
         auto size = cv::getTextSize(value, cv::FONT_HERSHEY_SIMPLEX,
@@ -325,7 +325,7 @@ void TouchHMI::draw_result_panel(cv::Mat& canvas, int rpx, int rpy, int rph,
                       selected ? Theme::CYAN : Theme::DIVIDER_GLOW,
                       selected ? 2 : 1);
         cv::putText(canvas, label, {rpx+18, cur_y-1},
-                    cv::FONT_HERSHEY_SIMPLEX, 0.38, Theme::TXT_DIM, 1, cv::LINE_AA);
+                    cv::FONT_HERSHEY_SIMPLEX, 0.34, Theme::TXT_DIM, 1, cv::LINE_AA);
         int baseline = 0;
         const auto value_size = cv::getTextSize(value, cv::FONT_HERSHEY_SIMPLEX,
                                                 0.48, 2, &baseline);
@@ -335,7 +335,7 @@ void TouchHMI::draw_result_panel(cv::Mat& canvas, int rpx, int rpy, int rph,
                     selected ? Theme::CYAN : measured_color, 2, cv::LINE_AA);
         if (!measured.empty()) {
             cv::putText(canvas, measured, {rpx+18, cur_y+15},
-                        cv::FONT_HERSHEY_SIMPLEX, 0.34,
+                        cv::FONT_HERSHEY_SIMPLEX, 0.30,
                         measured_color, 1, cv::LINE_AA);
         }
         cur_y += row_h + 4;
@@ -456,16 +456,15 @@ cv::Mat TouchHMI::draw(const cv::Mat& frame, const InspectionResult& result) {
     cv::rectangle(canvas, video_area, Theme::DIVIDER, 2);
 
     cv::Mat frame_vis;
-    const bool mono_frame = !frame.empty() && frame.channels() == 1;
     if (!frame.empty()) {
-        if      (frame.channels() == 3) frame_vis = frame;
+        if      (frame.channels() == 1) cv::cvtColor(frame, frame_vis, cv::COLOR_GRAY2BGR);
+        else if (frame.channels() == 3) frame_vis = frame;
         else if (frame.channels() == 4) cv::cvtColor(frame, frame_vis, cv::COLOR_BGRA2BGR);
     }
 
     int xo = video_area.x, yo = video_area.y;
     int nw = video_area.width, nh = video_area.height;
-    int fw = mono_frame ? frame.cols : frame_vis.cols;
-    int fh = mono_frame ? frame.rows : frame_vis.rows;
+    int fw = frame_vis.cols, fh = frame_vis.rows;
     if (fw > 0 && fh > 0) {
         double scale = std::min((double)video_area.width / fw,
                                 (double)video_area.height / fh);
@@ -473,69 +472,14 @@ cv::Mat TouchHMI::draw(const cv::Mat& frame, const InspectionResult& result) {
         if (nw > 0 && nh > 0) {
             xo = video_area.x + (video_area.width - nw) / 2;
             yo = video_area.y + (video_area.height - nh) / 2;
-            displayed_frame_size_ = mono_frame ? frame.size() : frame_vis.size();
+            displayed_frame_size_ = frame_vis.size();
             displayed_frame_rect_ = cv::Rect(xo, yo, nw, nh);
+            // Resize directly into the final canvas ROI. This produces the
+            // same pixels/interpolation while avoiding one full temporary
+            // image allocation and copy on every product.
             cv::Mat video_roi = canvas(displayed_frame_rect_);
-            const bool showing_threshold = svc_->state.calibration_mode &&
-                svc_->state.params.show_thresh;
-            const bool rotate_frame_for_display =
-                DetectionConfig::ROTATE_ROI_180 &&
-                !showing_threshold && !result.roi_view;
-            const int interpolation = showing_threshold
-                ? cv::INTER_NEAREST
-                : cv::INTER_LINEAR;
-            if (mono_frame) {
-                // Resize the single-channel native Mono8 image first, then
-                // expand only the small HMI rectangle to BGR. This avoids a
-                // 15 MB full-frame Mono8->BGR allocation every preview tick.
-                if (frame.size() == video_roi.size()) {
-                    cv::cvtColor(frame, video_roi, cv::COLOR_GRAY2BGR);
-                } else {
-                    cv::Mat gray_small;
-                    cv::resize(frame, gray_small, video_roi.size(), 0, 0, interpolation);
-                    cv::cvtColor(gray_small, video_roi, cv::COLOR_GRAY2BGR);
-                }
-            } else {
-                if (frame_vis.size() == video_roi.size())
-                    frame_vis.copyTo(video_roi);
-                else
-                    cv::resize(frame_vis, video_roi, video_roi.size(), 0, 0, interpolation);
-            }
-            // The threshold image already comes from the rotated detection
-            // ROI. Native camera frames still need the HMI rotation.
-            if (rotate_frame_for_display)
-                cv::flip(video_roi, video_roi, -1);
-
-            auto frame_to_canvas = [&](const cv::Point2f& point) {
-                cv::Point2f display_point = point;
-                if (rotate_frame_for_display) {
-                    display_point.x = displayed_frame_size_.width - 1 - display_point.x;
-                    display_point.y = displayed_frame_size_.height - 1 - display_point.y;
-                }
-                return cv::Point(
-                    xo + cvRound(display_point.x * nw / displayed_frame_size_.width),
-                    yo + cvRound(display_point.y * nh / displayed_frame_size_.height));
-            };
-            if (!showing_threshold && !result.frame_contour.empty() &&
-                displayed_frame_size_.width > 0 && displayed_frame_size_.height > 0) {
-                std::vector<cv::Point> contour;
-                contour.reserve(result.frame_contour.size());
-                for (const auto& point : result.frame_contour)
-                    contour.push_back(frame_to_canvas(point));
-                const cv::Scalar contour_color = result.result == ProductResult::NG
-                    ? cv::Scalar(0, 0, 255) : cv::Scalar(0, 255, 0);
-                cv::drawContours(canvas,
-                                 std::vector<std::vector<cv::Point>>{contour},
-                                 -1, contour_color, 1, cv::LINE_AA);
-            }
-            if (svc_->state.calibration_mode && roi_page_active() &&
-                displayed_frame_size_.width > 0 && displayed_frame_size_.height > 0) {
-                const auto points = svc_->roi_points_for_frame(displayed_frame_size_);
-                for (int i = 0; i < 4; ++i)
-                    cv::line(canvas, frame_to_canvas(points[i]),
-                             frame_to_canvas(points[(i + 1) % 4]),
-                             cv::Scalar(0, 230, 255), 3, cv::LINE_AA);
-            }
+            cv::resize(frame_vis, video_roi, video_roi.size(), 0, 0,
+                       scale < 1.0 ? cv::INTER_AREA : cv::INTER_LINEAR);
             cv::rectangle(canvas, {xo-1, yo-1}, {xo+nw+1, yo+nh+1}, Theme::DIVIDER_GLOW, 1);
         }
     } else {
@@ -573,10 +517,6 @@ bool TouchHMI::handle_roi_pointer(int event, int x, int y) {
                    displayed_frame_size_.width / displayed_frame_rect_.width;
         float fy = static_cast<float>(py - displayed_frame_rect_.y) *
                    displayed_frame_size_.height / displayed_frame_rect_.height;
-        if (DetectionConfig::ROTATE_ROI_180) {
-            fx = static_cast<float>(displayed_frame_size_.width - 1) - fx;
-            fy = static_cast<float>(displayed_frame_size_.height - 1) - fy;
-        }
         return cv::Point2f(fx, fy);
     };
 
@@ -625,7 +565,7 @@ void TouchHMI::complete_password_action() {
     if (password_disable_pending_) {
         password_protection_enabled_ = false;
         password_disable_pending_ = false;
-        log_msg(LOG_DEBUG, "HMI password protection: OFF");
+        log_msg(LOG_WARNING, "HMI password protection: OFF");
         return;
     }
 
@@ -775,12 +715,11 @@ void TouchHMI::handle(const std::string& name) {
             open_password_prompt(true);
         } else {
             password_protection_enabled_ = true;
-            log_msg(LOG_DEBUG, "HMI password protection: ON");
+            log_msg(LOG_WARNING, "HMI password protection: ON");
         }
     }
     else if (name == "Quay Lai" || name == "<- Quay Lai") {
         st.calibration_mode = false;
-        st.params.show_thresh = false;
         roi_dragging_ = false;
         calib_page_ = CalibPage::VISION;
         st.last_label = "READY";
@@ -791,10 +730,7 @@ void TouchHMI::handle(const std::string& name) {
     }
     else if (name == "Reset" || name == "Reset Dem") st.reset_counters();
     else if (name == "Vision")     { calib_page_ = CalibPage::VISION; }
-    else if (name == "ROI")        {
-        st.params.show_thresh = false;
-        calib_page_ = CalibPage::ROI;
-    }
+    else if (name == "ROI")        { calib_page_ = CalibPage::ROI; }
     else if (name == "Reset ROI")  { svc_->reset_roi_settings(); }
     else if (name == "Luu ROI")    { svc_->save_roi_settings(); }
     else if (name == "Reset Ts")   { st.params.reset();         st.save_state(); }
@@ -846,10 +782,7 @@ void TouchApp::on_mouse_callback(int event, int x, int y, int flags, void* ud) {
 
 void TouchApp::on_mouse(int event, int x, int y, int /*flags*/) {
     if (hmi_.password_active()) {
-        if (event == cv::EVENT_LBUTTONDOWN) {
-            hmi_.handle_password_touch(x, y);
-            last_password_render_ = 0;
-        }
+        if (event == cv::EVENT_LBUTTONDOWN) hmi_.handle_password_touch(x, y);
         if (event == cv::EVENT_LBUTTONUP) {
             for (auto& b : hmi_.normal_) b.pressed = false;
             for (auto& b : hmi_.calib_) b.pressed = false;
@@ -894,8 +827,6 @@ std::string TouchApp::run_waiting_state() {
     InspectionResult idle = last_display_result_;
     idle.label = vision_.state.last_label;
     idle.info_text = vision_.state.last_info_text;
-    if (!result_frame_frozen_)
-        idle.frame_contour.clear();
     if (idle.label == "READY") {
         idle.has_metrics = false;
         idle.cycle_ms = 0;
@@ -919,43 +850,14 @@ std::string TouchApp::run_waiting_state() {
         return "quit";
     }
 
-    const bool password_active = hmi_.password_active();
-    if (password_active && password_background_frame_.empty() &&
-        !last_display_frame_.empty()) {
-        const double scale = std::min(
-            960.0 / last_display_frame_.cols,
-            540.0 / last_display_frame_.rows);
-        if (scale < 1.0) {
-            cv::resize(last_display_frame_, password_background_frame_,
-                       cv::Size(), scale, scale, cv::INTER_LINEAR);
-        } else {
-            password_background_frame_ = last_display_frame_;
-        }
-    } else if (!password_active) {
-        password_background_frame_.release();
-    }
-    bool render = password_active
-        ? now - last_password_render_ >= PASSWORD_RENDER_INTERVAL
-        : vision_.should_render_waiting_frame(now);
+    bool render = vision_.should_render_waiting_frame(now);
     if (exit_btn && now - last_hold_render_ >= 0.04) {
         render = true;
         last_hold_render_ = now;
     }
     if (render) {
-        // PLC mode displays only captured trigger frames. run_trigger_cycle()
-        // replaces this cached image once per trigger; never overwrite it with
-        // the live MVS preview while waiting for the next product.
-        InspectionResult draw_result = idle;
-        draw_result.roi_view = display_frame_is_roi_;
-        if (password_active)
-            draw_result.frame_contour.clear();
-        const cv::Mat& draw_frame = password_active &&
-                !password_background_frame_.empty()
-            ? password_background_frame_ : last_display_frame_;
-        cv::Mat canvas = hmi_.draw(draw_frame, draw_result);
+        cv::Mat canvas = hmi_.draw(last_display_frame_, idle);
         cv::imshow("HMI", canvas);
-        if (password_active)
-            last_password_render_ = now;
     }
 
     int key = cv::waitKey(1) & 0xFF;
@@ -972,42 +874,9 @@ std::string TouchApp::run_waiting_state() {
 }
 
 std::string TouchApp::run_calibration_mode() {
-    // Calibration is live. PLC mode remains live after returning until the
-    // next trigger establishes a new frozen result frame.
-    result_frame_frozen_ = false;
     while (vision_.state.calibration_mode && vision_.running_ && !g_signal_received) {
         vision_.heartbeat();
         double now = now_sec();
-
-        // Password input owns the UI loop. Do not run ROI/threshold detection
-        // behind the modal; only pump events and redraw the frozen camera.
-        if (hmi_.password_active()) {
-            if (password_background_frame_.empty()) {
-                const cv::Mat& source = last_display_frame_.empty()
-                    ? last_calibration_result_.roi_vis : last_display_frame_;
-                if (!source.empty()) {
-                    const double scale = std::min(
-                        960.0 / source.cols, 540.0 / source.rows);
-                    if (scale < 1.0) {
-                        cv::resize(source, password_background_frame_,
-                                   cv::Size(), scale, scale, cv::INTER_LINEAR);
-                    } else {
-                        password_background_frame_ = source;
-                    }
-                }
-            }
-            if (now - last_password_render_ >= PASSWORD_RENDER_INTERVAL) {
-                InspectionResult draw_result = last_calibration_result_;
-                draw_result.frame_contour.clear();
-                cv::Mat canvas = hmi_.draw(password_background_frame_, draw_result);
-                cv::imshow("HMI", canvas);
-                last_password_render_ = now;
-            }
-            int key = cv::waitKey(1) & 0xFF;
-            hmi_.handle_key(key);
-            continue;
-        }
-        password_background_frame_.release();
 
         // Hold repeat for +/-
         if (hmi_.held_ == "+" || hmi_.held_ == "-") {
@@ -1018,33 +887,13 @@ std::string TouchApp::run_calibration_mode() {
             }
         }
 
-        // Keep video and touch responsive at 15 FPS, but run calibration
-        // detection at 5 Hz on the fast 540x402 ROI. Reusing the newest MVS
-        // frame prevents camera contention and duplicate native-frame copies.
-        if (hmi_.roi_page_active()) {
-            if (now - last_calibration_process_ >= CALIBRATION_DETECT_INTERVAL) {
-                last_calibration_result_ = vision_.process_frame_for_roi_calibration();
-                last_calibration_process_ = now_sec();
-            }
-        } else if (now - last_calibration_process_ >= CALIBRATION_DETECT_INTERVAL) {
-            last_calibration_result_ = vision_.process_frame_for_calibration();
-            last_calibration_process_ = now_sec();
-        }
-        if (now - last_calibration_render_ >= CALIBRATION_RENDER_INTERVAL) {
-            cv::Mat live_frame = vision_.latest_preview_frame();
-            const bool show_threshold = vision_.state.params.show_thresh &&
-                !last_calibration_result_.roi_vis.empty();
-            const cv::Mat& frame = show_threshold
-                ? last_calibration_result_.roi_vis
-                : (live_frame.empty() ? last_calibration_result_.roi_vis : live_frame);
-            if (!live_frame.empty()) {
-                last_display_frame_ = live_frame;
-                display_frame_is_roi_ = false;
-            }
-            cv::Mat canvas = hmi_.draw(frame, last_calibration_result_);
-            cv::imshow("HMI", canvas);
-            last_calibration_render_ = now_sec();
-        }
+        InspectionResult result;
+        if (hmi_.roi_page_active())
+            result = vision_.process_frame_for_roi_calibration();
+        else
+            result = vision_.process_frame_for_calibration();
+        cv::Mat canvas = hmi_.draw(result.roi_vis, result);
+        cv::imshow("HMI", canvas);
 
         int key = cv::waitKey(1) & 0xFF;
         hmi_.handle_key(key);
@@ -1061,20 +910,21 @@ std::string TouchApp::run_calibration_mode() {
 }
 
 std::string TouchApp::run_trigger_cycle(double trigger_time) {
-    const double display_t0 = trigger_time > 0.0 ? trigger_time : now_sec();
+    const double display_t0 = now_sec();
     InspectionResult result = vision_.process_trigger(trigger_time);
     last_display_result_ = result;
     // Zero-copy cv::Mat reference: freeze exactly one completed trigger image.
     // The waiting loop redraws this cached image and never requests a camera frame.
     if (!result.roi_vis.empty()) {
         last_display_frame_ = result.roi_vis;
-        result_frame_frozen_ = true;
-        display_frame_is_roi_ = result.roi_view;
+        log_msg(LOG_WARNING, "HMI freeze: published %dx%d result=%s",
+                last_display_frame_.cols, last_display_frame_.rows,
+                result.label.c_str());
     } else {
         if (last_display_frame_.empty() && !vision_.last_result_frame().empty())
             last_display_frame_ = vision_.last_result_frame();
-        result_frame_frozen_ = !last_display_frame_.empty();
-        display_frame_is_roi_ = result.roi_view;
+        log_msg(LOG_WARNING, "HMI freeze: trigger image empty, cached=%s",
+                last_display_frame_.empty() ? "NO" : "YES");
     }
     cv::Mat canvas = hmi_.draw(last_display_frame_, result);
     const double compose_done = now_sec();
@@ -1094,15 +944,16 @@ std::string TouchApp::run_trigger_cycle(double trigger_time) {
             "Trigger displayed: processing=%.0fms present=%.0fms total=%.0fms "
             "(compose=%.1fms submit=%.1fms pump=%.1fms)",
             result.cycle_ms,
-            std::max(0.0, (display_done - display_t0) * 1000.0 - result.cycle_ms),
+            (display_done - display_t0) * 1000.0 - result.cycle_ms,
             (display_done - display_t0) * 1000.0,
-            std::max(0.0, (compose_done - display_t0) * 1000.0 - result.cycle_ms),
+            (compose_done - display_t0) * 1000.0 - result.cycle_ms,
             (submit_done - compose_done) * 1000.0,
             (display_done - submit_done) * 1000.0);
     return "";
 }
 
 void TouchApp::run() {
+    log_msg(LOG_WARNING, "TouchApp started");
     try {
         while (vision_.running_ && !g_signal_received) {
             vision_.heartbeat();
@@ -1114,6 +965,7 @@ void TouchApp::run() {
 
             if (vision_.has_pending_trigger()) {
                 double t = vision_.consume_trigger();
+                log_msg(LOG_WARNING, "Main loop: TRIGGER");
                 if (run_trigger_cycle(t) == "quit") break;
             } else {
                 if (run_waiting_state() == "quit") break;

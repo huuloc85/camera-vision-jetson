@@ -3,134 +3,9 @@
 #include "vision/image_processor.h"
 #include "core/logger.h"
 
-#if CV_VERSION_MAJOR >= 5
-#include <opencv2/geometry/2d.hpp>
-#endif
-
 #include <algorithm>
 #include <climits>
 #include <cmath>
-#include <utility>
-
-namespace {
-int percentile_value(std::vector<int> values, double fraction) {
-  if (values.empty())
-    return 0;
-  std::sort(values.begin(), values.end());
-  const size_t index = static_cast<size_t>(
-      std::round(fraction * static_cast<double>(values.size() - 1)));
-  return values[std::min(index, values.size() - 1)];
-}
-
-bool row_span(const cv::Mat &mask, int y, int &left, int &right) {
-  left = -1;
-  right = -1;
-  const uchar *row = mask.ptr<uchar>(y);
-  for (int x = 0; x < mask.cols; ++x) {
-    if (row[x] == 0)
-      continue;
-    if (left < 0)
-      left = x;
-    right = x;
-  }
-  return left >= 0;
-}
-
-bool largest_external_contour(const cv::Mat &mask,
-                              std::vector<cv::Point> &contour) {
-  std::vector<std::vector<cv::Point>> contours;
-  cv::findContours(mask, contours, cv::RETR_EXTERNAL,
-                   cv::CHAIN_APPROX_SIMPLE);
-  if (contours.empty())
-    return false;
-  const auto largest = std::max_element(
-      contours.begin(), contours.end(),
-      [](const std::vector<cv::Point> &a, const std::vector<cv::Point> &b) {
-        return cv::contourArea(a) < cv::contourArea(b);
-      });
-  contour = *largest;
-  return true;
-}
-
-double lower_to_upper_width_ratio(const std::vector<cv::Point> &contour) {
-  const cv::Rect bounds = cv::boundingRect(contour);
-  if (bounds.width <= 0 || bounds.height < 20)
-    return 0.0;
-
-  cv::Mat shape = cv::Mat::zeros(bounds.size(), CV_8UC1);
-  std::vector<cv::Point> local;
-  local.reserve(contour.size());
-  for (const auto &point : contour)
-    local.emplace_back(point.x - bounds.x, point.y - bounds.y);
-  cv::drawContours(shape, std::vector<std::vector<cv::Point>>{local}, -1,
-                   cv::Scalar(255), cv::FILLED);
-
-  std::vector<int> upper_widths, lower_widths;
-  for (int y = 0; y < shape.rows; ++y) {
-    int left = -1, right = -1;
-    if (!row_span(shape, y, left, right))
-      continue;
-    const double position = static_cast<double>(y) / shape.rows;
-    const int width = right - left + 1;
-    if (position >= 0.12 && position <= 0.42)
-      upper_widths.push_back(width);
-    else if (position >= 0.62 && position <= 0.90)
-      lower_widths.push_back(width);
-  }
-  const int upper = percentile_value(upper_widths, 0.50);
-  const int lower = percentile_value(lower_widths, 0.50);
-  return upper > 0 ? static_cast<double>(lower) / upper : 0.0;
-}
-
-bool best_product_contour(const cv::Mat &mask,
-                          std::vector<cv::Point> &contour) {
-  std::vector<std::vector<cv::Point>> contours;
-  cv::findContours(mask, contours, cv::RETR_EXTERNAL,
-                   cv::CHAIN_APPROX_SIMPLE);
-  const double min_area = std::max(150.0, mask.total() * 0.002);
-  const int border_margin = std::max(2, std::min(mask.cols, mask.rows) / 100);
-  double best_score = -1e9;
-  bool found = false;
-
-  for (const auto &candidate : contours) {
-    const double area = cv::contourArea(candidate);
-    const cv::Rect bounds = cv::boundingRect(candidate);
-    if (area < min_area || bounds.height < mask.rows * 0.15 ||
-        bounds.width < mask.cols * 0.05)
-      continue;
-
-    const int border_touches =
-        (bounds.x <= border_margin ? 1 : 0) +
-        (bounds.y <= border_margin ? 1 : 0) +
-        (bounds.x + bounds.width >= mask.cols - border_margin ? 1 : 0) +
-        (bounds.y + bounds.height >= mask.rows - border_margin ? 1 : 0);
-    if (border_touches >= 3)
-      continue;
-
-    const double center_x = bounds.x + bounds.width * 0.5;
-    const double center_score = std::max(
-        0.0, 1.0 - std::abs(center_x - mask.cols * 0.5) / (mask.cols * 0.5));
-    const double height_score =
-        std::min(1.0, static_cast<double>(bounds.height) / mask.rows);
-    const double vertical_score = std::min(
-        1.0, static_cast<double>(bounds.height) / std::max(1, bounds.width));
-    const double width_ratio = lower_to_upper_width_ratio(candidate);
-    const double bottle_score = std::clamp((width_ratio - 1.0) / 0.75,
-                                           0.0, 1.0);
-    const double horizontal_penalty = bounds.width > bounds.height * 2
-        ? 3.0 : 0.0;
-    const double score = 4.0 * center_score + 3.0 * height_score +
-                         3.0 * bottle_score + vertical_score -
-                         1.25 * border_touches - horizontal_penalty;
-    if (score > best_score) {
-      best_score = score;
-      contour = candidate;
-      found = true;
-    }
-  }
-  return found;
-}
-}
 
 // ── ImageProcessor ───────────────────────────────────
 ImageProcessor::ImageProcessor(const DetectionParams &params, const RoiParams& roi)
@@ -154,8 +29,8 @@ ImageProcessor::ImageProcessor(const DetectionParams &params, const RoiParams& r
 
       // Pay CUDA module loading and allocation costs during startup instead
       // of delaying the first product result.
-      const cv::Mat warmup(DetectionConfig::REFERENCE_FRAME_HEIGHT,
-                           DetectionConfig::REFERENCE_FRAME_WIDTH,
+      const cv::Mat warmup(DetectionConfig::CAMERA_FRAME_HEIGHT,
+                           DetectionConfig::CAMERA_FRAME_WIDTH,
                            CV_8UC3, cv::Scalar::all(0));
       const cv::Mat identity = cv::Mat::eye(3, 3, CV_64F);
       gpu_frame_.upload(warmup);
@@ -203,8 +78,8 @@ std::array<cv::Point2f, 4>
 ImageProcessor::roi_points_for_frame(const cv::Size& frame_size) const {
   cv::Size size = frame_size;
   if (size.width <= 0 || size.height <= 0)
-    size = cv::Size(DetectionConfig::REFERENCE_FRAME_WIDTH,
-                    DetectionConfig::REFERENCE_FRAME_HEIGHT);
+    size = cv::Size(DetectionConfig::CAMERA_FRAME_WIDTH,
+                    DetectionConfig::CAMERA_FRAME_HEIGHT);
   std::array<cv::Point2f, 4> points = roi_.points;
   const float sx = static_cast<float>(size.width) / RoiParams::REF_WIDTH;
   const float sy = static_cast<float>(size.height) / RoiParams::REF_HEIGHT;
@@ -267,10 +142,7 @@ std::pair<cv::Mat, cv::Mat> ImageProcessor::preprocess(const cv::Mat &roi) {
     } else {
       gpu_roi_.upload(roi);
     }
-    if (gpu_roi_.channels() == 1)
-      gpu_roi_.copyTo(gpu_gray_);
-    else
-      cv::cuda::cvtColor(gpu_roi_, gpu_gray_, cv::COLOR_BGR2GRAY);
+    cv::cuda::cvtColor(gpu_roi_, gpu_gray_, cv::COLOR_BGR2GRAY);
     gpu_gaussian_->apply(gpu_gray_, gpu_blurred_);
     cv::cuda::threshold(gpu_blurred_, gpu_thresh_, t, 255, cv::THRESH_BINARY);
     // CUDA filters are not guaranteed to support in-place input/output.
@@ -285,10 +157,7 @@ std::pair<cv::Mat, cv::Mat> ImageProcessor::preprocess(const cv::Mat &roi) {
 #endif
 
   cv::Mat gray, blurred, thresh;
-  if (roi.channels() == 1)
-    gray = roi;
-  else
-    cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
+  cv::cvtColor(roi, gray, cv::COLOR_BGR2GRAY);
   cv::GaussianBlur(gray, blurred, {11, 11}, 2.5);
 
   if (DetectionConfig::EDGE_WHITE_ON_BLACK_MODE) {
@@ -306,7 +175,7 @@ std::pair<cv::Mat, cv::Mat> ImageProcessor::preprocess(const cv::Mat &roi) {
                      cv::Point(-1, -1), 2);
     filled = cv::Mat::zeros(merged.size(), CV_8UC1);
     std::vector<std::vector<cv::Point>> contours;
-    cv::findContours(merged, contours, cv::RETR_EXTERNAL,
+    cv::findContours(merged.clone(), contours, cv::RETR_EXTERNAL,
                      cv::CHAIN_APPROX_SIMPLE);
     for (const auto &c : contours)
       if (cv::contourArea(c) >= 150.0)
@@ -316,6 +185,19 @@ std::pair<cv::Mat, cv::Mat> ImageProcessor::preprocess(const cv::Mat &roi) {
                      cv::Point(-1, -1), 1);
   } else {
     cv::threshold(blurred, thresh, t, 255, cv::THRESH_BINARY);
+    // A short CSI exposure can move the whole histogram below the persisted
+    // operator threshold. Keep the configured value for normal frames, but
+    // recover when it produces an obviously unusable all-dark/all-bright mask.
+    const double foreground_ratio =
+        static_cast<double>(cv::countNonZero(thresh)) /
+        static_cast<double>(thresh.total());
+    if (foreground_ratio < 0.01 || foreground_ratio > 0.90) {
+      const double otsu_threshold = cv::threshold(
+          blurred, thresh, 0, 255, cv::THRESH_BINARY | cv::THRESH_OTSU);
+      log_msg(LOG_WARNING,
+              "Threshold fallback: configured=%d foreground=%.1f%% otsu=%.0f",
+              t, foreground_ratio * 100.0, otsu_threshold);
+    }
     cv::morphologyEx(thresh, thresh, cv::MORPH_CLOSE, morph_kernel_large_,
                      cv::Point(-1, -1), 2);
     cv::morphologyEx(thresh, thresh, cv::MORPH_OPEN, morph_kernel_xl_,
@@ -404,186 +286,6 @@ std::vector<cv::Point> ImageProcessor::map_roi_contour_to_frame(
 }
 
 // ── Static helpers ────────────────────────────────────
-bool ImageProcessor::select_product_contour(
-    const cv::Mat &thresh, std::vector<cv::Point> &contour,
-    cv::Mat &product_mask) {
-  contour.clear();
-  product_mask.release();
-  if (thresh.empty() || thresh.type() != CV_8UC1)
-    return false;
-
-  if (!best_product_contour(thresh, contour))
-    return false;
-  product_mask = cv::Mat::zeros(thresh.size(), CV_8UC1);
-  cv::drawContours(product_mask,
-                   std::vector<std::vector<cv::Point>>{contour}, -1,
-                   cv::Scalar(255), cv::FILLED);
-
-  cv::Rect bounds = cv::boundingRect(contour);
-  double largest_area = cv::contourArea(contour);
-  if (bounds.width < 40 || bounds.height < 80)
-    return true;
-
-  std::vector<int> stable_widths;
-  for (int y = bounds.y; y < bounds.y + bounds.height; ++y) {
-    int left = -1, right = -1;
-    if (row_span(product_mask, y, left, right) && right - left + 1 >= 20)
-      stable_widths.push_back(right - left + 1);
-  }
-  const int stable_width = percentile_value(stable_widths, 0.65);
-  const bool possible_lateral_glare = stable_width > 0 &&
-      bounds.width - stable_width >= std::max(6, stable_width / 20);
-
-  if (possible_lateral_glare) {
-    // Conveyor glare is predominantly horizontal. When it touches the white
-    // product, both regions become one connected component and contour ranking
-    // alone cannot separate them. A narrow vertical opening keeps the tall
-    // product columns while removing short horizontal light bands and small
-    // side reflections without changing the threshold value.
-    int vertical_size = std::clamp(bounds.height / 12, 9, 31);
-    if (vertical_size % 2 == 0)
-      ++vertical_size;
-    cv::Mat vertical_supported;
-    const cv::Mat vertical_kernel = cv::getStructuringElement(
-        cv::MORPH_RECT, cv::Size(1, vertical_size));
-    cv::morphologyEx(product_mask, vertical_supported, cv::MORPH_OPEN,
-                     vertical_kernel);
-
-    std::vector<cv::Point> supported_contour;
-    if (largest_external_contour(vertical_supported, supported_contour)) {
-      const cv::Rect supported_bounds = cv::boundingRect(supported_contour);
-      const double supported_area = cv::contourArea(supported_contour);
-      const int lateral_reduction = bounds.width - supported_bounds.width;
-      const bool removed_lateral_glare =
-          lateral_reduction >= std::max(6, bounds.width / 20);
-      if (removed_lateral_glare && supported_area >= largest_area * 0.55 &&
-          supported_bounds.height >= bounds.height * 0.80) {
-        contour = std::move(supported_contour);
-        product_mask.setTo(0);
-        cv::drawContours(product_mask,
-                         std::vector<std::vector<cv::Point>>{contour}, -1,
-                         cv::Scalar(255), cv::FILLED);
-        bounds = cv::boundingRect(contour);
-        largest_area = cv::contourArea(contour);
-      }
-    }
-  }
-
-  // The lower third is the broad product body and is not affected by the
-  // cable seen beside the upper neck. Use it as the geometry anchor.
-  std::vector<int> body_widths;
-  std::vector<int> body_centers;
-  const int body_start = bounds.y + bounds.height * 2 / 3;
-  const int bottom = std::min(product_mask.rows, bounds.y + bounds.height);
-  for (int y = body_start; y < bottom; ++y) {
-    int left = -1, right = -1;
-    if (!row_span(product_mask, y, left, right))
-      continue;
-    const int width = right - left + 1;
-    if (width >= 20) {
-      body_widths.push_back(width);
-      body_centers.push_back((left + right) / 2);
-    }
-  }
-  if (body_widths.size() < 8)
-    return true;
-
-  const int body_width = percentile_value(body_widths, 0.65);
-  const int body_center = percentile_value(body_centers, 0.50);
-  if (body_width < 30)
-    return true;
-
-  // Classify from the robust lower-body width, not the full component width.
-  // A hand or cloth attached beside the neck can widen the component bounds
-  // enough to disable the very branch-pruning step needed to remove it.
-  const bool bottle_like = body_width < bounds.height * 0.80;
-  if (!bottle_like)
-    return true;
-
-  // Learn the narrow neck. Rows widened by an attached side object are not
-  // allowed into these robust edge percentiles.
-  std::vector<int> neck_lefts, neck_rights, neck_widths, neck_rows;
-  const int upper_limit = bounds.y + bounds.height * 2 / 3;
-  for (int y = bounds.y; y < upper_limit; ++y) {
-    int left = -1, right = -1;
-    if (!row_span(product_mask, y, left, right) ||
-        body_center < left || body_center > right)
-      continue;
-    const int width = right - left + 1;
-    if (width < std::max(12, body_width / 6) ||
-        width > static_cast<int>(body_width * 0.62))
-      continue;
-    neck_lefts.push_back(left);
-    neck_rights.push_back(right);
-    neck_widths.push_back(width);
-    neck_rows.push_back(y);
-  }
-  if (neck_lefts.size() < 8)
-    return true;
-
-  const int median_neck_width = percentile_value(neck_widths, 0.50);
-  std::vector<int> stable_lefts, stable_rights;
-  int last_neck_y = bounds.y;
-  for (size_t i = 0; i < neck_widths.size(); ++i) {
-    if (neck_widths[i] > static_cast<int>(median_neck_width * 1.20))
-      continue;
-    stable_lefts.push_back(neck_lefts[i]);
-    stable_rights.push_back(neck_rights[i]);
-    last_neck_y = neck_rows[i];
-  }
-  if (stable_lefts.size() < 8)
-    return true;
-
-  const int padding = std::max(3, median_neck_width / 16);
-  const int neck_left = std::max(
-      0, percentile_value(stable_lefts, 0.15) - padding);
-  const int neck_right = std::min(
-      product_mask.cols - 1,
-      percentile_value(stable_rights, 0.85) + padding);
-  const int prune_end = last_neck_y - std::max(2, bounds.height / 60);
-  if (prune_end <= bounds.y || neck_right <= neck_left)
-    return true;
-
-  int outside_pixels = 0;
-  int farthest_excursion = 0;
-  for (int y = bounds.y; y <= prune_end; ++y) {
-    const uchar *row = product_mask.ptr<uchar>(y);
-    for (int x = bounds.x; x < bounds.x + bounds.width; ++x) {
-      if (row[x] == 0 || (x >= neck_left && x <= neck_right))
-        continue;
-      ++outside_pixels;
-      farthest_excursion = std::max(
-          farthest_excursion,
-          x < neck_left ? neck_left - x : x - neck_right);
-    }
-  }
-
-  // Do not trim normal cap waviness or small molding defects. Refinement is
-  // enabled only for a substantial branch far outside the learned neck.
-  const int min_outside_pixels = std::max(
-      30, static_cast<int>(largest_area * 0.003));
-  if (outside_pixels < min_outside_pixels ||
-      farthest_excursion < std::max(10, median_neck_width / 4))
-    return true;
-
-  const int left_cut_end = std::max(bounds.x, neck_left);
-  const int right_cut_start = std::min(
-      bounds.x + bounds.width, neck_right + 1);
-  for (int y = bounds.y; y <= prune_end; ++y) {
-    uchar *row = product_mask.ptr<uchar>(y);
-    std::fill(row + bounds.x, row + left_cut_end, 0);
-    std::fill(row + right_cut_start, row + bounds.x + bounds.width, 0);
-  }
-
-  if (!largest_external_contour(product_mask, contour))
-    return true;
-  product_mask.setTo(0);
-  cv::drawContours(product_mask,
-                   std::vector<std::vector<cv::Point>>{contour}, -1,
-                   cv::Scalar(255), cv::FILLED);
-  return true;
-}
-
 std::tuple<double, int, int>
 ImageProcessor::measure_spike(const std::vector<cv::Point> &contour,
                               const cv::Mat &thresh) {

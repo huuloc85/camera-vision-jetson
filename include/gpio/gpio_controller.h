@@ -28,6 +28,7 @@ public:
 
     // Trigger queue — filled by UART listener thread
     bool   has_pending_trigger() const;
+    double pending_trigger_time() const;
     double consume_trigger();        // Returns trigger timestamp
 
     void cleanup();
@@ -48,7 +49,6 @@ private:
     mutable std::mutex trigger_mutex_;
     std::atomic<bool>   listening_{true};
     std::atomic<double> last_uart_rx_{0.0};
-    std::atomic<double> last_trigger_enqueue_{0.0};
 
     // Async command queue for non-critical commands (PING, STATUS)
     std::thread   uart_writer_thread_;

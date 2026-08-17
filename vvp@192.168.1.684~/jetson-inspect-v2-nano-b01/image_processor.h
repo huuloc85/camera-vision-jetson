@@ -39,13 +39,6 @@ public:
     static std::tuple<double, int, int> measure_spike(
         const std::vector<cv::Point>& contour, const cv::Mat& thresh);
 
-    // Select the product component, suppress connected conveyor glare, and
-    // remove large side branches attached to the narrow upper neck.
-    // product_mask is used for consistent shape measurements.
-    static bool select_product_contour(
-        const cv::Mat& thresh, std::vector<cv::Point>& contour,
-        cv::Mat& product_mask);
-
     static ShapeMetrics calculate_metrics(
         const std::vector<cv::Point>& contour,
         int x, int y, int w, int h, const cv::Mat& thresh);

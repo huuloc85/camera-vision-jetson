@@ -7,7 +7,7 @@
 //                 └── TouchHMI       (UI rendering, touch input)
 //
 // VisionService owns:
-//   LibcameraCapture  (GStreamer pipeline)
+//   MvsCamera         (Hikrobot MVS GigE SDK)
 //   GPIOController    (UART ↔ ESP32 ↔ PLC)
 //   ImageProcessor    (warp ROI, threshold, metrics)
 //   ProductClassifier (shape-rule classify)
@@ -64,19 +64,17 @@ int main(int argc, char* argv[]) {
 
     // ── Print build info ────────────────────────────
 #if USE_CUDA_ACCEL
-    log_msg(LOG_WARNING, "Build: CUDA acceleration ENABLED");
+    log_msg(LOG_DEBUG, "Build: CUDA acceleration ENABLED");
 #else
-    log_msg(LOG_WARNING, "Build: CUDA acceleration DISABLED (CPU-only)");
+    log_msg(LOG_DEBUG, "Build: CUDA acceleration DISABLED (CPU-only)");
 #endif
 
-    log_msg(LOG_WARNING, "Config: UART=%s  BAUD=%d",
+    log_msg(LOG_DEBUG, "Config: UART=%s  BAUD=%d",
             SerialConfig::UART_DEVICE, SerialConfig::BAUD_RATE);
-    log_msg(LOG_WARNING, "Config: Camera %dx%d  MinArea=%.0f  Threshold=%d",
-            DetectionConfig::CAMERA_FRAME_WIDTH,
-            DetectionConfig::CAMERA_FRAME_HEIGHT,
+    log_msg(LOG_DEBUG, "Config: Camera=MVS native settings  MinArea=%.0f  Threshold=%d",
             DetectionConfig::MIN_AREA,
             DetectionConfig::FIXED_THRESHOLD);
-    log_msg(LOG_WARNING, "Config: Camera sleep=%s",
+    log_msg(LOG_DEBUG, "Config: Camera sleep=%s",
             DetectionConfig::CAMERA_SLEEP_TIMEOUT <= 0.0 ? "DISABLED" : "ENABLED");
 
     // ── Launch application ──────────────────────────
@@ -91,6 +89,6 @@ int main(int argc, char* argv[]) {
         return EXIT_FAILURE;
     }
 
-    log_msg(LOG_WARNING, "Clean exit.");
+    log_msg(LOG_DEBUG, "Clean exit.");
     return EXIT_SUCCESS;
 }

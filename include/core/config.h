@@ -56,20 +56,20 @@ struct SerialConfig {
 // Camera & Detection Config
 // ══════════════════════════════════════════════════════
 struct DetectionConfig {
-    static constexpr int    CAMERA_FRAME_WIDTH          = 1920;
-    static constexpr int    CAMERA_FRAME_HEIGHT         = 1080;
-    static constexpr int    CAMERA_FPS                  = 60;
-    static constexpr bool   CAMERA_FOCUS_AUTOMATIC      = true;
-    static constexpr int    CAMERA_FOCUS_ABSOLUTE       = 5;
+    // ROI coordinates were calibrated against this reference canvas. These
+    // values do not configure or resize the native MVS camera frame.
+    static constexpr int    REFERENCE_FRAME_WIDTH       = 1920;
+    static constexpr int    REFERENCE_FRAME_HEIGHT      = 1080;
     static constexpr double MIN_AREA                    = 2500.0;
     static constexpr int    MIN_HEIGHT                  = 80;
     static constexpr double MIN_SOLIDITY                = 0.50;
     static constexpr int    FIXED_THRESHOLD             = 170;
-    static constexpr double WAITING_RENDER_INTERVAL     = 0.2;
+    // HMI live stream target. The camera worker keeps only the newest
+    // display-sized preview, so 30 FPS does not queue native frames.
+    static constexpr double WAITING_RENDER_INTERVAL     = 1.0 / 30.0;
     static constexpr double MAIN_LOOP_TIMEOUT           = 15.0;
     static constexpr double CAPTURE_TIMEOUT             = 2.0;
-    // Production runs 24/7. Keep the USB/GStreamer pipeline warm so the first
-    // trigger after a long idle period never has to reopen the decoder.
+    // Production runs 24/7. Keep the MVS stream open between triggers.
     static constexpr double CAMERA_SLEEP_TIMEOUT        = 0.0;
     static constexpr double CAMERA_WAKE_SETTLE          = 1.0;
     static constexpr double LATEST_FRAME_MAX_AGE        = 0.25;
@@ -77,17 +77,14 @@ struct DetectionConfig {
     // next realtime frame is retrieved and decoded.
     static constexpr int    LATEST_FRAME_WAIT_MS        = 100;
     static constexpr int    CAMERA_RESTART_FAIL_COUNT   = 30;
-    // Orin Nano 8GB has six CPU cores; leave headroom for HMI/UART.
-    static constexpr int    OPENCV_NUM_THREADS          = 4;
-    // V4L2 is configured with a single driver buffer; discard that one stale
-    // slot before retrieving the realtime trigger frame.
+    // Optional MVS queue flush before direct capture.
     static constexpr int    CAPTURE_FLUSH_COUNT         = 1;
     static constexpr int    CAPTURE_SETTLE_MS           = 0;
-    static constexpr int    TRIGGER_DEBOUNCE_MS         = 50;
     static constexpr double SPIKE_RATIO_THRESHOLD       = 0.05;
     static constexpr double SPIKE_CAP_ZONE              = 0.50;
     static constexpr bool   EDGE_WHITE_ON_BLACK_MODE    = false;
-    static constexpr bool   ROTATE_ROI_180              = false;
+    // Camera is mounted upside down; rotate only the detection ROI and HMI view.
+    static constexpr bool   ROTATE_ROI_180              = true;
     static constexpr bool   ROTATE_ROI_USING_SRC_REMAP  = false;
 
 };

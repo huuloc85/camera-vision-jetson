@@ -23,9 +23,9 @@
 #define PLC_TRIGGER 4 // Opto INPUT (riêng) ← PLC trigger
 
 // Opto OUTPUT module channels
-#define PIN_OK 5    // CH1 → PLC OK
-#define PIN_NG 6    // CH2 → PLC NG
-#define PIN_BUSY 7  // CH3 → PLC BUSY
+#define PIN_OK 5   // CH1 → PLC OK
+#define PIN_NG 6   // CH2 → PLC NG
+#define PIN_BUSY 7 // CH3 → PLC BUSY
 
 // ── Opto/Relay drive logic ───────────────────────────────
 // Set to 0 = active-HIGH push-pull (tested OK with test_uart.ino)
@@ -55,7 +55,7 @@ static const uint8_t PLC_TRIG_MODE = INPUT_PULLUP;
 
 // ── Config ───────────────────────────────────────────────
 #define UART_BAUD 115200
-#define RESULT_TIMEOUT_MS 15000  // Release BUSY if Jetson stops responding
+#define RESULT_TIMEOUT_MS 15000 // Release BUSY if Jetson stops responding
 
 // ── UART ─────────────────────────────────────────────────
 HardwareSerial JetsonSerial(1); // UART1 → GPIO16(RX)/GPIO17(TX)
